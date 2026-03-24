@@ -1,0 +1,5 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.Renviron\.example$
+^LICENSE\.md$
+^inst/quarto$

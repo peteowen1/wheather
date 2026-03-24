@@ -1,0 +1,145 @@
+---
+title: "wheather: Scoring Methodology"
+subtitle: "How we measure whether the weather was actually better"
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: flatly
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(wheather)
+library(data.table)
+library(ggplot2)
+```
+
+## The Problem
+
+"This summer's weather was way better than last year's." Everyone has an opinion, but how do you actually measure it? **wheather** turns daily weather data into a single 0-100 "goodness" score and compares periods statistically.
+
+## Data Source
+
+We use the [OpenWeather One Call API 3.0](https://openweathermap.org/api/one-call-3) Day Summary endpoint, which provides daily aggregates back to 1979:
+
+- Temperature: min, max, morning, afternoon, evening, night (°C)
+- Precipitation: total (mm)
+- Cloud cover: afternoon (%)
+- Humidity: afternoon (%)
+- Wind: max speed (m/s)
+
+## Scoring Components
+
+Each day gets five component scores (0-100), then a weighted average produces the total score.
+
+### Temperature Score (default weight: 30%)
+
+A bell curve centred on an "ideal range" (default 22-26°C, configurable):
+
+$$
+\text{score} = \max\left(0,\; 100 - r \cdot d^{p}\right)
+$$
+
+Where $d$ = distance from the nearest ideal bound, $r$ = decay rate (default 5), $p$ = decay power (default 1.5).
+
+```{r}
+#| label: temp-curve
+#| fig-cap: "Temperature scoring curve (default parameters)"
+params <- default_params()
+temps <- seq(5, 45, by = 0.5)
+scores <- vapply(temps, function(t) {
+  score_temp(t, NA, NA, params)
+}, numeric(1))
+
+ggplot(data.frame(temp = temps, score = scores), aes(temp, score)) +
+  geom_line(linewidth = 1.2, colour = "#2980b9") +
+  geom_vline(xintercept = c(22, 26), linetype = "dashed", alpha = 0.5) +
+  annotate("rect", xmin = 22, xmax = 26, ymin = 0, ymax = 100,
+           fill = "#2ecc71", alpha = 0.15) +
+  labs(x = "Afternoon Temperature (°C)", y = "Score") +
+  theme_minimal(base_size = 14)
+```
+
+### Rain Score (default weight: 20%)
+
+Exponential decay — dry days score highest:
+
+$$
+\text{score} = 100 \cdot e^{-k \cdot \text{rain\_mm}}
+$$
+
+Where $k$ is calibrated so that 10mm (heavy rain) scores ~15.
+
+```{r}
+#| label: rain-curve
+#| fig-cap: "Rain scoring curve"
+rain_mm <- seq(0, 30, by = 0.5)
+scores <- vapply(rain_mm, function(r) score_rain(r, params), numeric(1))
+
+ggplot(data.frame(rain = rain_mm, score = scores), aes(rain, score)) +
+  geom_line(linewidth = 1.2, colour = "#3498db") +
+  labs(x = "Total Precipitation (mm)", y = "Score") +
+  theme_minimal(base_size = 14)
+```
+
+### Cloud Cover Score (default weight: 20%)
+
+Linear: $\text{score} = 100 - \text{cloud\_cover\_pct}$
+
+### Humidity Score (default weight: 15%)
+
+Comfort zone at 30-60%, linear decay outside.
+
+### Wind Score (default weight: 15%)
+
+Pleasant up to 15 km/h, linear decay to 0 at 50 km/h.
+
+## Weighting
+
+The default weights reflect a general "good weather = warm, sunny, dry" preference:
+
+| Component | Weight |
+|-----------|--------|
+| Temperature | 30% |
+| Rain | 20% |
+| Cloud cover | 20% |
+| Humidity | 15% |
+| Wind | 15% |
+
+These are fully configurable. Someone who hates wind might set wind to 30% and reduce temperature.
+
+## Statistical Comparison
+
+Given two scored periods, we compute:
+
+1. **Mean and SD** of daily scores for each period
+2. **Welch's t-test** — is the difference statistically significant?
+3. **Cohen's d** — how large is the effect?
+   - d < 0.2: negligible
+   - 0.2-0.5: small
+   - 0.5-0.8: medium
+   - d > 0.8: large
+
+## Example: Sydney Summer 2024-25 vs 2023-24
+
+*(Run this with your API key to see real results)*
+
+```{r}
+#| label: example
+#| eval: false
+result <- compare_periods(
+  lat = -33.87, lon = 151.21,
+  start1 = "2024-12-01", end1 = "2025-02-28",
+  start2 = "2023-12-01", end2 = "2024-02-29"
+)
+print(result)
+```
+
+## Limitations
+
+- **"Good weather" is subjective** — the scoring reflects configurable preferences, not objective truth. A surfer and a hiker score the same day differently.
+- **Daily aggregation loses nuance** — a day with morning rain and afternoon sun gets averaged.
+- **No UV or air quality** — the Day Summary endpoint doesn't include these.
+- **Comparison assumes similar day counts** — comparing 90 days to 30 days works statistically but may feel unfair.

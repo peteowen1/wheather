@@ -1,0 +1,28 @@
+Package: wheather
+Title: Compare Weather Quality Across Years
+Version: 0.1.0
+Authors@R:
+    person("Pete", "O", role = c("aut", "cre"), email = "pete@example.com")
+Description: Was this summer's weather actually better than last year's?
+    Fetches historical weather data from the Open-Meteo API (free, no key
+    required), scores each day's "goodness" on a 0-100 scale using
+    configurable weights (temperature, rain, sunshine, cloud cover,
+    humidity, wind), and compares periods across years with statistical
+    tests. Includes a Shiny app for interactive exploration.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports:
+    httr2,
+    data.table,
+    arrow,
+    cli,
+    ggplot2,
+    shiny,
+    bslib,
+    bsicons,
+    DT
+Suggests:
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
