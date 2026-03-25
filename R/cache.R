@@ -25,8 +25,11 @@ get_cached <- function(lat, lon) {
   path <- cache_path(lat, lon)
   if (!file.exists(path)) return(NULL)
   tryCatch({
-    dt <- data.table::as.data.table(arrow::read_parquet(path))
-    if ("date" %in% names(dt)) dt[, date := as.Date(date)]
+    # Use ReadableFile (not mmap) to avoid Windows file-locking issues
+    rf <- arrow::ReadableFile$create(path)
+    on.exit(rf$close(), add = TRUE)
+    dt <- data.table::as.data.table(arrow::read_parquet(rf))
+    if ("date" %in% names(dt)) data.table::set(dt, j = "date", value = as.Date(dt[["date"]]))
     dt
   }, error = function(e) {
     unlink(path)
@@ -43,7 +46,14 @@ get_cached <- function(lat, lon) {
 save_to_cache <- function(data, lat, lon) {
   path <- cache_path(lat, lon)
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  arrow::write_parquet(data, path)
+  # Write to temp file then overwrite atomically
+  tmp <- tempfile(fileext = ".parquet", tmpdir = dirname(path))
+  arrow::write_parquet(data, tmp)
+  if (!file.copy(tmp, path, overwrite = TRUE)) {
+    unlink(tmp)
+    cli::cli_abort("Failed to write cache file: {.path {path}}")
+  }
+  unlink(tmp)
 }
 
 #' Clear the entire cache or cache for a specific location

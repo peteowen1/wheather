@@ -76,7 +76,7 @@ fetch_open_meteo <- function(lat, lon, start, end) {
       daily = daily_vars,
       timezone = "auto"
     ) |>
-    httr2::req_retry(max_tries = 3) |>
+    httr2::req_retry(max_tries = 5, backoff = ~ 5 * 2^(.x - 1)) |>
     httr2::req_perform()
 
   json <- httr2::resp_body_json(resp)

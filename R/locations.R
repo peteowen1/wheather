@@ -28,12 +28,14 @@ geocode <- function(city) {
     cli::cli_abort("No results found for {.val {city}}")
   }
 
+  safe <- function(x, default) if (is.null(x)) default else x
+
   data.table::data.table(
-    name    = vapply(results, \(x) x$name %||% NA_character_, character(1)),
-    lat     = vapply(results, \(x) x$latitude %||% NA_real_, numeric(1)),
-    lon     = vapply(results, \(x) x$longitude %||% NA_real_, numeric(1)),
-    country = vapply(results, \(x) x$country %||% NA_character_, character(1)),
-    state   = vapply(results, \(x) x$admin1 %||% NA_character_, character(1))
+    name    = vapply(results, \(x) safe(x$name, NA_character_), character(1)),
+    lat     = vapply(results, \(x) safe(x$latitude, NA_real_), numeric(1)),
+    lon     = vapply(results, \(x) safe(x$longitude, NA_real_), numeric(1)),
+    country = vapply(results, \(x) safe(x$country, NA_character_), character(1)),
+    state   = vapply(results, \(x) safe(x$admin1, NA_character_), character(1))
   )
 }
 
@@ -67,4 +69,29 @@ lookup_city <- function(city) {
   idx <- which(tolower(cities[["name"]]) == city_lower)
   if (length(idx) > 0) return(cities[idx, ])
   NULL
+}
+
+#' Resolve a location from either city name or lat/lon
+#'
+#' Returns a list with lat, lon, and label (for display).
+#' Accepts city name as a string, or numeric lat/lon.
+#'
+#' @param city City name (optional if lat/lon provided)
+#' @param lat Latitude (optional if city provided)
+#' @param lon Longitude (optional if city provided)
+#' @return List with lat, lon, label
+#' @noRd
+resolve_location <- function(city = NULL, lat = NULL, lon = NULL) {
+  if (!is.null(city)) {
+    geo <- geocode(city)
+    list(
+      lat   = geo$lat[1],
+      lon   = geo$lon[1],
+      label = paste0(geo$name[1], ", ", geo$country[1])
+    )
+  } else if (!is.null(lat) && !is.null(lon)) {
+    list(lat = lat, lon = lon, label = sprintf("%.2f, %.2f", lat, lon))
+  } else {
+    cli::cli_abort("Provide either {.arg city} or both {.arg lat} and {.arg lon}.")
+  }
 }

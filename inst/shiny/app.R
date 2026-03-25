@@ -33,15 +33,14 @@ ui <- page_sidebar(
     hr(),
     h6("Scoring Weights"),
     sliderInput("w_temp", "Temperature", min = 0, max = 1, value = 0.25, step = 0.05),
-    sliderInput("w_rain", "Rain", min = 0, max = 1, value = 0.20, step = 0.05),
-    sliderInput("w_sunshine", "Sunshine", min = 0, max = 1, value = 0.20, step = 0.05),
-    sliderInput("w_cloud", "Cloud cover", min = 0, max = 1, value = 0.10, step = 0.05),
-    sliderInput("w_humidity", "Humidity", min = 0, max = 1, value = 0.15, step = 0.05),
-    sliderInput("w_wind", "Wind", min = 0, max = 1, value = 0.10, step = 0.05),
+    sliderInput("w_rain", "Rain", min = 0, max = 1, value = 0.25, step = 0.05),
+    sliderInput("w_sky", "Sky (sun+cloud)", min = 0, max = 1, value = 0.20, step = 0.05),
+    sliderInput("w_humidity", "Humidity", min = 0, max = 1, value = 0.10, step = 0.05),
+    sliderInput("w_wind", "Wind", min = 0, max = 1, value = 0.20, step = 0.05),
 
     hr(),
     h6("Temperature Ideal Range (\u00b0C)"),
-    sliderInput("temp_range", NULL, min = 10, max = 40, value = c(22, 26), step = 1),
+    sliderInput("temp_range", NULL, min = 10, max = 40, value = c(21, 25), step = 1),
 
     hr(),
     actionButton("go", "Compare!", class = "btn-primary btn-lg w-100"),
@@ -118,8 +117,8 @@ server <- function(input, output, session) {
 
   # Weight validation
   output$weight_warning <- renderText({
-    total <- input$w_temp + input$w_rain + input$w_sunshine +
-             input$w_cloud + input$w_humidity + input$w_wind
+    total <- input$w_temp + input$w_rain + input$w_sky +
+             input$w_humidity + input$w_wind
     if (abs(total - 1) > 0.01) {
       sprintf("Weights sum to %.2f (should be 1.00)", total)
     } else {
@@ -130,12 +129,12 @@ server <- function(input, output, session) {
   # Run comparison
   observeEvent(input$go, {
     weights <- list(
-      temp = input$w_temp, rain = input$w_rain, sunshine = input$w_sunshine,
-      cloud = input$w_cloud, humidity = input$w_humidity, wind = input$w_wind
+      temp = input$w_temp, rain = input$w_rain, sky = input$w_sky,
+      humidity = input$w_humidity, wind = input$w_wind
     )
     params <- default_params()
-    params$temp$ideal_min <- input$temp_range[1]
-    params$temp$ideal_max <- input$temp_range[2]
+    params$temp$mean_ideal_min <- input$temp_range[1]
+    params$temp$mean_ideal_max <- input$temp_range[2]
 
     withProgress(message = "Fetching weather data...", {
       tryCatch({
@@ -204,8 +203,8 @@ server <- function(input, output, session) {
   output$component_bars <- renderPlot({
     req(rv$comparison)
     dt <- rv$comparison$data
-    score_cols <- c("score_temp", "score_rain", "score_sunshine",
-                    "score_cloud", "score_humidity", "score_wind")
+    score_cols <- c("score_temp", "score_rain", "score_sky",
+                    "score_humidity", "score_wind")
     means <- dt[, lapply(.SD, mean, na.rm = TRUE), by = label, .SDcols = score_cols]
     melted <- data.table::melt(means, id.vars = "label", variable.name = "component", value.name = "score")
     melted[, component := gsub("score_", "", component)]
@@ -221,8 +220,8 @@ server <- function(input, output, session) {
   output$component_timeline <- renderPlot({
     req(rv$comparison)
     dt <- rv$comparison$data
-    score_cols <- c("score_temp", "score_rain", "score_sunshine",
-                    "score_cloud", "score_humidity", "score_wind")
+    score_cols <- c("score_temp", "score_rain", "score_sky",
+                    "score_humidity", "score_wind")
     melted <- data.table::melt(dt, id.vars = c("day_index", "label"),
                                 measure.vars = score_cols,
                                 variable.name = "component", value.name = "score")
@@ -242,20 +241,20 @@ server <- function(input, output, session) {
   output$raw_table <- DT::renderDataTable({
     req(rv$comparison)
     dt <- rv$comparison$data[, .(label, date, score_total, score_temp, score_rain,
-                                  score_sunshine, score_cloud, score_humidity, score_wind,
+                                  score_sky, score_humidity, score_wind,
                                   temp_mean, temp_min, temp_max,
                                   precip_total, sunshine_secs, cloud_cover,
-                                  humidity_mean, wind_max_kmh)]
+                                  humidity_mean, wind_max_kmh, wind_gust_kmh)]
     # Convert sunshine to hours for readability
-    dt[, sunshine_hrs := round(sunshine_secs / 3600, 1)]
-    dt[, sunshine_secs := NULL]
+    data.table::set(dt, j = "sunshine_hrs", value = round(dt[["sunshine_secs"]] / 3600, 1))
+    data.table::set(dt, j = "sunshine_secs", value = NULL)
 
     DT::datatable(dt, options = list(pageLength = 20, scrollX = TRUE),
                   rownames = FALSE) |>
-      DT::formatRound(columns = c("score_total", "score_temp", "score_rain", "score_sunshine",
-                                    "score_cloud", "score_humidity", "score_wind"), digits = 1) |>
+      DT::formatRound(columns = c("score_total", "score_temp", "score_rain", "score_sky",
+                                    "score_humidity", "score_wind"), digits = 1) |>
       DT::formatRound(columns = c("temp_mean", "temp_min", "temp_max",
-                                    "precip_total", "wind_max_kmh"), digits = 1)
+                                    "precip_total", "wind_max_kmh", "wind_gust_kmh"), digits = 1)
   })
 }
 

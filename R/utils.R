@@ -1,9 +1,8 @@
 #' Generate a sequence of dates
-#'
 #' @param start Start date (Date or character YYYY-MM-DD)
 #' @param end End date (Date or character YYYY-MM-DD)
 #' @return Character vector of dates in YYYY-MM-DD format
-#' @export
+#' @noRd
 date_seq <- function(start, end) {
   start <- as.Date(start)
   end <- as.Date(end)
