@@ -45,7 +45,10 @@ default_params <- function() {
       cloud_sweet_min = 10,  # some scattered clouds are ideal
       cloud_sweet_max = 25,  # above this, starts feeling overcast
       cloud_penalty_rate = 1.25,  # how fast score drops above sweet spot
-      radiation_max = NULL   # MJ/m² for a clear day; NULL = auto-detect from data
+      radiation_max = NULL,  # MJ/m² for a clear day; NULL = auto-detect from data
+      sun_weight = 0.50,     # sub-weight for sunshine duration
+      cloud_weight = 0.30,   # sub-weight for cloud cover
+      rad_weight = 0.20      # sub-weight for solar radiation
     ),
     humidity = list(
       ideal_min = 40,    # sweet spot lower bound (%)
@@ -163,7 +166,7 @@ score_sky <- function(sunshine_secs, daylight_secs, cloud_cover,
 
   # Weighted blend of available components
   vals    <- c(sun_score, cloud_score, rad_score)
-  weights <- c(0.50, 0.30, 0.20)
+  weights <- c(params$sky$sun_weight, params$sky$cloud_weight, params$sky$rad_weight)
   valid   <- !is.na(vals)
   if (!any(valid)) return(NA_real_)
   sum(vals[valid] * weights[valid]) / sum(weights[valid])
@@ -208,6 +211,92 @@ score_wind <- function(wind_max_kmh, wind_gust_kmh = NA, params) {
   }
 
   max(0, sustained_score - gust_penalty)
+}
+
+# --- Vectorized scoring helpers for score_period() ---
+
+#' Vectorized temperature score
+#' @noRd
+score_temp_vec <- function(temp_mean, temp_min, temp_max, params) {
+  p <- params$temp
+  score_single <- function(value, ideal_min, ideal_max) {
+    dist <- pmax(ideal_min - value, value - ideal_max, 0)
+    ifelse(is.na(value), NA_real_, pmax(0, 100 - p$decay_rate * dist^p$decay_power))
+  }
+  s_mean <- score_single(temp_mean, p$mean_ideal_min, p$mean_ideal_max)
+  s_max  <- score_single(temp_max,  p$max_ideal_min,  p$max_ideal_max)
+  s_min  <- score_single(temp_min,  p$min_ideal_min,  p$min_ideal_max)
+
+  mat <- cbind(s_max, s_mean, s_min)
+  wts <- c(p$w_max, p$w_mean, p$w_min)
+  valid <- !is.na(mat)
+  ws <- rowSums(mat * rep(wts, each = nrow(mat)), na.rm = TRUE)
+  wt <- rowSums(valid * rep(wts, each = nrow(mat)))
+  ifelse(wt > 0, ws / wt, NA_real_)
+}
+
+#' Vectorized rain score
+#' @noRd
+score_rain_vec <- function(precip_total, precip_hours, snowfall_sum, params) {
+  p <- params$rain
+  k <- -log(0.15) / p$heavy_mm
+  base <- ifelse(is.na(precip_total), NA_real_,
+           ifelse(precip_total == 0, 100, pmax(0, 100 * exp(-k * precip_total))))
+  hours_penalty <- ifelse(is.na(precip_hours) | precip_hours <= 2, 0,
+                          pmin(15, (precip_hours - 2) * 2))
+  snow_penalty <- ifelse(is.na(snowfall_sum) | snowfall_sum <= 0, 0,
+                         pmin(30, snowfall_sum * 10))
+  pmax(0, base - hours_penalty - snow_penalty)
+}
+
+#' Vectorized sky score
+#' @noRd
+score_sky_vec <- function(sunshine_secs, daylight_secs, cloud_cover, radiation_sum, params) {
+  p <- params$sky
+  # Sunshine component (50%)
+  pct <- ifelse(!is.na(sunshine_secs) & !is.na(daylight_secs) & daylight_secs > 0,
+                (sunshine_secs / daylight_secs) * 100, NA_real_)
+  sun_score <- ifelse(is.na(pct), NA_real_,
+                ifelse(pct >= 85, 100, pmax(0, pct / 85 * 100)))
+  # Cloud component (30%)
+  cloud_score <- ifelse(is.na(cloud_cover), NA_real_,
+                  ifelse(cloud_cover <= p$cloud_sweet_max, 100,
+                         pmax(0, 100 - (cloud_cover - p$cloud_sweet_max) * p$cloud_penalty_rate)))
+  # Radiation component (20%)
+  rad_max <- if (!is.null(p$radiation_max)) p$radiation_max else 28
+  rad_score <- ifelse(is.na(radiation_sum), NA_real_,
+                      pmin(100, pmax(0, radiation_sum / rad_max * 100)))
+  # Weighted blend
+  mat <- cbind(sun_score, cloud_score, rad_score)
+  wts <- c(p$sun_weight, p$cloud_weight, p$rad_weight)
+  valid <- !is.na(mat)
+  ws <- rowSums(mat * rep(wts, each = nrow(mat)), na.rm = TRUE)
+  wt <- rowSums(valid * rep(wts, each = nrow(mat)))
+  ifelse(wt > 0, ws / wt, NA_real_)
+}
+
+#' Vectorized humidity score
+#' @noRd
+score_humidity_vec <- function(humidity, params) {
+  p <- params$humidity
+  decay <- ifelse(humidity < p$ideal_min, p$dry_decay, p$humid_decay)
+  dist <- ifelse(humidity < p$ideal_min, p$ideal_min - humidity, humidity - p$ideal_max)
+  dist <- pmax(dist, 0)
+  ifelse(is.na(humidity), NA_real_,
+   ifelse(humidity >= p$ideal_min & humidity <= p$ideal_max, 100,
+          pmax(0, 100 - decay * dist)))
+}
+
+#' Vectorized wind score
+#' @noRd
+score_wind_vec <- function(wind_max_kmh, wind_gust_kmh, params) {
+  p <- params$wind
+  sustained <- ifelse(wind_max_kmh <= p$pleasant_max, 100,
+                ifelse(wind_max_kmh >= p$extreme, 0,
+                       100 * (p$extreme - wind_max_kmh) / (p$extreme - p$pleasant_max)))
+  gust_frac <- pmin(1, (wind_gust_kmh - p$gust_threshold) / (p$gust_extreme - p$gust_threshold))
+  gust_penalty <- ifelse(is.na(wind_gust_kmh) | wind_gust_kmh <= p$gust_threshold, 0, 40 * gust_frac)
+  ifelse(is.na(wind_max_kmh), NA_real_, pmax(0, sustained - gust_penalty))
 }
 
 #' Compute weighted total with NA normalisation
@@ -276,18 +365,19 @@ score_period <- function(data, weights = default_weights(), params = default_par
   wnd  <- v("wind_max_kmh"); gst <- v("wind_gust_kmh")
 
   # Auto-detect radiation_max from data if not explicitly set
-  if (is.null(params$sky$radiation_max)) {
+  # max() returns -Inf when all values are NA; guard with any(!is.na())
+  if (is.null(params$sky$radiation_max) && any(!is.na(rad))) {
     observed_max <- max(rad, na.rm = TRUE)
-    if (is.finite(observed_max) && observed_max > 0) {
+    if (observed_max > 0) {
       params$sky$radiation_max <- observed_max
     }
   }
 
-  s_temp     <- vapply(seq_len(n), \(i) score_temp(tm[i], tmin[i], tmax[i], params), numeric(1))
-  s_rain     <- vapply(seq_len(n), \(i) score_rain(prcp[i], phrs[i], snow[i], params), numeric(1))
-  s_sky      <- vapply(seq_len(n), \(i) score_sky(sun[i], day[i], cld[i], rad[i], params), numeric(1))
-  s_humidity <- vapply(seq_len(n), \(i) score_humidity(hum[i], params), numeric(1))
-  s_wind     <- vapply(seq_len(n), \(i) score_wind(wnd[i], gst[i], params), numeric(1))
+  s_temp     <- score_temp_vec(tm, tmin, tmax, params)
+  s_rain     <- score_rain_vec(prcp, phrs, snow, params)
+  s_sky      <- score_sky_vec(sun, day, cld, rad, params)
+  s_humidity <- score_humidity_vec(hum, params)
+  s_wind     <- score_wind_vec(wnd, gst, params)
 
   data.table::set(out, j = "score_temp",     value = s_temp)
   data.table::set(out, j = "score_rain",     value = s_rain)

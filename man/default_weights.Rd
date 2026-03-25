@@ -11,5 +11,6 @@ Named list of weights
 }
 \description{
 Controls how much each weather component contributes to the
-overall day score. Weights must sum to 1.
+overall day score. Weights must sum to 1. Five components:
+temp, rain, sky (merged sunshine+cloud), humidity, wind.
 }

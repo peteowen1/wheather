@@ -5,21 +5,23 @@
 \title{Compare weather quality between two time periods}
 \usage{
 compare_periods(
-  lat,
-  lon,
+  city = NULL,
+  lat = NULL,
+  lon = NULL,
   start1,
   end1,
   start2,
   end2,
   weights = default_weights(),
-  params = default_params(),
-  api_key = get_api_key()
+  params = default_params()
 )
 }
 \arguments{
-\item{lat}{Latitude}
+\item{city}{City name (e.g., "Sydney"). Alternative to lat/lon.}
 
-\item{lon}{Longitude}
+\item{lat}{Latitude (used if city is NULL)}
+
+\item{lon}{Longitude (used if city is NULL)}
 
 \item{start1, end1}{First period (e.g., "2024-12-01" to "2025-02-28")}
 
@@ -28,8 +30,6 @@ compare_periods(
 \item{weights}{Scoring weights}
 
 \item{params}{Scoring parameters}
-
-\item{api_key}{API key}
 }
 \value{
 A list with class "wheather_comparison" containing scored data and summary

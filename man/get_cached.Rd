@@ -2,20 +2,18 @@
 % Please edit documentation in R/cache.R
 \name{get_cached}
 \alias{get_cached}
-\title{Retrieve cached weather data for a single date}
+\title{Retrieve cached weather data for a location}
 \usage{
-get_cached(lat, lon, date)
+get_cached(lat, lon)
 }
 \arguments{
 \item{lat}{Latitude (rounded to 2 decimal places)}
 
 \item{lon}{Longitude (rounded to 2 decimal places)}
-
-\item{date}{Date string (YYYY-MM-DD)}
 }
 \value{
 A data.table or NULL if not cached
 }
 \description{
-Retrieve cached weather data for a single date
+Retrieve cached weather data for a location
 }

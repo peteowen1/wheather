@@ -4,17 +4,15 @@
 \alias{geocode}
 \title{Look up coordinates for a city name}
 \usage{
-geocode(city, api_key = get_api_key())
+geocode(city)
 }
 \arguments{
-\item{city}{City name (e.g., "Sydney", "London, UK")}
-
-\item{api_key}{API key (only needed if city not in built-in table)}
+\item{city}{City name (e.g., "Sydney", "London")}
 }
 \value{
-A data.table with columns: name, lat, lon, country, state
+A data.table with columns: name, lat, lon, country
 }
 \description{
-Uses OpenWeather's Geocoding API. Tries the built-in lookup table
-first for instant results, falls back to API.
+Uses Open-Meteo's Geocoding API (free, no key required).
+Tries the built-in lookup table first for instant results.
 }

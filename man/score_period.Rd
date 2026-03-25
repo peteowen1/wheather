@@ -7,7 +7,7 @@
 score_period(data, weights = default_weights(), params = default_params())
 }
 \arguments{
-\item{data}{A data.table from \code{\link[=fetch_date_range]{fetch_date_range()}}}
+\item{data}{A data.table from \code{\link[=fetch_weather]{fetch_weather()}}}
 
 \item{weights}{Scoring weights}
 

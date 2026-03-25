@@ -1,13 +1,28 @@
+#' Detect radiation_max from combined data so both periods use the same scale
+#' @noRd
+unify_radiation_max <- function(params, data1, data2) {
+  if (!is.null(params$sky$radiation_max)) return(params)
+  rad <- c(as.numeric(data1[["radiation_sum"]]), as.numeric(data2[["radiation_sum"]]))
+  rad <- rad[!is.na(rad)]
+  if (length(rad) > 0 && max(rad) > 0) {
+    params$sky$radiation_max <- max(rad)
+  }
+  params
+}
+
 #' Assemble a wheather_comparison from two scored datasets
 #' @noRd
 build_comparison <- function(scored1, scored2, weights, params, location) {
-  data.table::set(scored1, j = "day_index", value = seq_len(nrow(scored1)))
-  data.table::set(scored2, j = "day_index", value = seq_len(nrow(scored2)))
+  # Copy to avoid mutating the caller's data.tables by reference
+  s1 <- data.table::copy(scored1)
+  s2 <- data.table::copy(scored2)
+  data.table::set(s1, j = "day_index", value = seq_len(nrow(s1)))
+  data.table::set(s2, j = "day_index", value = seq_len(nrow(s2)))
 
   result <- list(
-    data     = data.table::rbindlist(list(scored1, scored2)),
-    period1  = scored1,
-    period2  = scored2,
+    data     = data.table::rbindlist(list(s1, s2)),
+    period1  = s1,
+    period2  = s2,
     summary  = build_summary(scored1, scored2),
     weights  = weights,
     params   = params,
@@ -36,18 +51,26 @@ compare_periods <- function(city = NULL, lat = NULL, lon = NULL,
                             start2, end2,
                             weights = default_weights(),
                             params = default_params()) {
+  validate_date_range(start1, end1, "Period 1")
+  validate_date_range(start2, end2, "Period 2")
   loc <- resolve_location(city, lat, lon)
   cli::cli_h1("{loc$label}")
 
   label_for <- function(s, e) paste(format(as.Date(s), "%b %Y"), "-", format(as.Date(e), "%b %Y"))
 
   cli::cli_h2("Period 1: {start1} to {end1}")
-  scored1 <- score_period(fetch_weather(loc$lat, loc$lon, start1, end1), weights, params)
+  data1 <- fetch_weather(loc$lat, loc$lon, start1, end1)
+  cli::cli_h2("Period 2: {start2} to {end2}")
+  data2 <- fetch_weather(loc$lat, loc$lon, start2, end2)
+
+  # Auto-detect radiation_max from BOTH periods so they're scored on the same scale
+  params <- unify_radiation_max(params, data1, data2)
+
+  scored1 <- score_period(data1, weights, params)
   data.table::set(scored1, j = "period", value = "Period 1")
   data.table::set(scored1, j = "label",  value = label_for(start1, end1))
 
-  cli::cli_h2("Period 2: {start2} to {end2}")
-  scored2 <- score_period(fetch_weather(loc$lat, loc$lon, start2, end2), weights, params)
+  scored2 <- score_period(data2, weights, params)
   data.table::set(scored2, j = "period", value = "Period 2")
   data.table::set(scored2, j = "label",  value = label_for(start2, end2))
 
@@ -66,16 +89,23 @@ compare_periods <- function(city = NULL, lat = NULL, lon = NULL,
 compare_cities <- function(city1, city2, start, end,
                            weights = default_weights(),
                            params = default_params()) {
+  validate_date_range(start, end)
   loc1 <- resolve_location(city1)
   loc2 <- resolve_location(city2)
 
   cli::cli_h2("{loc1$label}: {start} to {end}")
-  scored1 <- score_period(fetch_weather(loc1$lat, loc1$lon, start, end), weights, params)
+  data1 <- fetch_weather(loc1$lat, loc1$lon, start, end)
+  cli::cli_h2("{loc2$label}: {start} to {end}")
+  data2 <- fetch_weather(loc2$lat, loc2$lon, start, end)
+
+  # Auto-detect radiation_max from BOTH cities so they're scored on the same scale
+  params <- unify_radiation_max(params, data1, data2)
+
+  scored1 <- score_period(data1, weights, params)
   data.table::set(scored1, j = "period", value = loc1$label)
   data.table::set(scored1, j = "label",  value = loc1$label)
 
-  cli::cli_h2("{loc2$label}: {start} to {end}")
-  scored2 <- score_period(fetch_weather(loc2$lat, loc2$lon, start, end), weights, params)
+  scored2 <- score_period(data2, weights, params)
   data.table::set(scored2, j = "period", value = loc2$label)
   data.table::set(scored2, j = "label",  value = loc2$label)
 
@@ -92,6 +122,19 @@ build_summary <- function(scored1, scored2) {
 
   label1 <- scored1$label[1]
   label2 <- scored2$label[1]
+
+  # Guard against empty score vectors (all NA data)
+  if (length(s1) == 0 || length(s2) == 0) {
+    return(list(
+      period1  = list(label = label1, mean = NaN, sd = NA_real_,
+                      median = NA_real_, best = -Inf, worst = Inf),
+      period2  = list(label = label2, mean = NaN, sd = NA_real_,
+                      median = NA_real_, best = -Inf, worst = Inf),
+      t_test   = NULL,
+      cohens_d = NA_real_,
+      verdict  = "Insufficient data: one or both periods had no scoreable days"
+    ))
+  }
 
   # Need at least 2 observations per group for a t-test
   can_test <- length(s1) >= 2 && length(s2) >= 2
@@ -161,6 +204,8 @@ print.wheather_comparison <- function(x, ...) {
 
   # Build debug table: raw values | component scores | total
   dt <- data.table::copy(x$data)
+  # Convert sunshine seconds to hours before defining column list
+  data.table::set(dt, j = "sunshine_hrs", value = round(dt[["sunshine_secs"]] / 3600, 1))
   debug_cols <- c(
     "period", "date",
     "temp_min", "temp_mean", "temp_max", "score_temp",
@@ -170,8 +215,6 @@ print.wheather_comparison <- function(x, ...) {
     "wind_max_kmh", "wind_gust_kmh", "score_wind",
     "score_total"
   )
-  # Convert sunshine seconds to hours for readability
-  data.table::set(dt, j = "sunshine_hrs", value = round(dt[["sunshine_secs"]] / 3600, 1))
 
   # Round numeric columns for cleaner output
   round_cols <- c("temp_min", "temp_mean", "temp_max", "precip_total",

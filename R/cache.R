@@ -6,7 +6,7 @@
 #' @return Path string
 #' @export
 cache_dir <- function() {
-  getOption("wheather.cache_dir", file.path(Sys.getenv("HOME"), ".wheather", "cache"))
+  getOption("wheather.cache_dir", tools::R_user_dir("wheather", "cache"))
 }
 
 #' Build the cache file path for a location
@@ -32,7 +32,13 @@ get_cached <- function(lat, lon) {
     if ("date" %in% names(dt)) data.table::set(dt, j = "date", value = as.Date(dt[["date"]]))
     dt
   }, error = function(e) {
-    unlink(path)
+    msg <- conditionMessage(e)
+    if (grepl("corrupt|invalid|magic number|not a parquet", msg, ignore.case = TRUE)) {
+      cli::cli_warn("Removing corrupt cache file: {.path {path}}")
+      unlink(path)
+    } else {
+      cli::cli_warn("Could not read cache ({msg}), fetching from API instead")
+    }
     NULL
   })
 }
@@ -46,14 +52,18 @@ get_cached <- function(lat, lon) {
 save_to_cache <- function(data, lat, lon) {
   path <- cache_path(lat, lon)
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
-  # Write to temp file then overwrite atomically
+  # Write to temp file then rename (atomic on same volume)
   tmp <- tempfile(fileext = ".parquet", tmpdir = dirname(path))
   arrow::write_parquet(data, tmp)
-  if (!file.copy(tmp, path, overwrite = TRUE)) {
+  # file.rename is atomic within the same filesystem; fall back to copy if it fails
+  # (e.g., cross-device move)
+  if (!file.rename(tmp, path)) {
+    if (!file.copy(tmp, path, overwrite = TRUE)) {
+      unlink(tmp)
+      cli::cli_abort("Failed to write cache file: {.path {path}}")
+    }
     unlink(tmp)
-    cli::cli_abort("Failed to write cache file: {.path {path}}")
   }
-  unlink(tmp)
 }
 
 #' Clear the entire cache or cache for a specific location

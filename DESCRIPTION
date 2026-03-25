@@ -6,8 +6,8 @@ Authors@R:
 Description: Was this summer's weather actually better than last year's?
     Fetches historical weather data from the Open-Meteo API (free, no key
     required), scores each day's "goodness" on a 0-100 scale using
-    configurable weights (temperature, rain, sunshine, cloud cover,
-    humidity, wind), and compares periods across years with statistical
+    configurable weights (temperature, rain, sky, humidity, wind),
+    and compares periods across years with statistical
     tests. Includes a Shiny app for interactive exploration.
 License: MIT + file LICENSE
 Encoding: UTF-8
@@ -18,6 +18,8 @@ Imports:
     data.table,
     arrow,
     cli,
+    stats,
+    tools,
     ggplot2,
     shiny,
     bslib,

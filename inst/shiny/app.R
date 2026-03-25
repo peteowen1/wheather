@@ -90,6 +90,14 @@ ui <- page_sidebar(
 # --- Server ---
 server <- function(input, output, session) {
 
+
+  # Stable colour palette: Period 1 always blue, Period 2 always orange
+  period_colours <- function() {
+    req(rv$comparison)
+    labels <- unique(rv$comparison$data$label)
+    setNames(c("#2980b9", "#e67e22")[seq_along(labels)], labels)
+  }
+
   # Reactive values
   rv <- reactiveValues(
     lat = -33.87,
@@ -133,8 +141,15 @@ server <- function(input, output, session) {
       humidity = input$w_humidity, wind = input$w_wind
     )
     params <- default_params()
+    # Shift all three temp ideal ranges by the same offset as the user's slider
+    mean_shift_lo <- input$temp_range[1] - params$temp$mean_ideal_min
+    mean_shift_hi <- input$temp_range[2] - params$temp$mean_ideal_max
     params$temp$mean_ideal_min <- input$temp_range[1]
     params$temp$mean_ideal_max <- input$temp_range[2]
+    params$temp$max_ideal_min  <- params$temp$max_ideal_min + mean_shift_lo
+    params$temp$max_ideal_max  <- params$temp$max_ideal_max + mean_shift_hi
+    params$temp$min_ideal_min  <- params$temp$min_ideal_min + mean_shift_lo
+    params$temp$min_ideal_max  <- params$temp$min_ideal_max + mean_shift_hi
 
     withProgress(message = "Fetching weather data...", {
       tryCatch({
@@ -193,7 +208,7 @@ server <- function(input, output, session) {
     ggplot(dt, aes(x = day_index, y = score_total, colour = label)) +
       geom_line(linewidth = 0.8, alpha = 0.7) +
       geom_smooth(method = "loess", se = FALSE, linewidth = 1.2) +
-      scale_colour_manual(values = c("#2980b9", "#e67e22")) +
+      scale_colour_manual(values = period_colours()) +
       labs(x = "Day of Period", y = "Weather Score (0-100)", colour = NULL) +
       theme_minimal(base_size = 14) +
       theme(legend.position = "top")
@@ -211,7 +226,7 @@ server <- function(input, output, session) {
 
     ggplot(melted, aes(x = component, y = score, fill = label)) +
       geom_col(position = "dodge", width = 0.7) +
-      scale_fill_manual(values = c("#2980b9", "#e67e22")) +
+      scale_fill_manual(values = period_colours()) +
       labs(x = NULL, y = "Mean Score (0-100)", fill = NULL) +
       theme_minimal(base_size = 14) +
       theme(legend.position = "top")
@@ -231,7 +246,7 @@ server <- function(input, output, session) {
       geom_line(alpha = 0.5) +
       geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
       facet_wrap(~component, ncol = 2, scales = "free_y") +
-      scale_colour_manual(values = c("#2980b9", "#e67e22")) +
+      scale_colour_manual(values = period_colours()) +
       labs(x = "Day of Period", y = "Score", colour = NULL) +
       theme_minimal(base_size = 12) +
       theme(legend.position = "top")

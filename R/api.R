@@ -10,11 +10,15 @@
 #' @return A data.table with one row per day
 #' @export
 fetch_weather <- function(lat, lon, start, end) {
+  if (lat < -90 || lat > 90) cli::cli_abort("{.arg lat} must be between -90 and 90, got {lat}")
+  if (lon < -180 || lon > 180) cli::cli_abort("{.arg lon} must be between -180 and 180, got {lon}")
   coords <- round_coords(lat, lon)
+  start_d <- as.Date(start)
+  end_d   <- as.Date(end)
 
   # Check cache first
   cached <- get_cached(coords$lat, coords$lon)
-  requested <- as.Date(date_seq(start, end))
+  requested <- seq.Date(start_d, end_d, by = "day")
 
   if (!is.null(cached)) {
     cached_dates <- as.Date(cached$date)
@@ -25,16 +29,17 @@ fetch_weather <- function(lat, lon, start, end) {
 
   if (length(missing) == 0) {
     cli::cli_alert_success("All {length(requested)} days loaded from cache")
-    idx <- as.Date(cached$date) >= as.Date(start) & as.Date(cached$date) <= as.Date(end)
-    return(cached[idx, ])
+    return(cached[as.Date(cached$date) >= start_d & as.Date(cached$date) <= end_d, ])
   }
 
-  # Fetch missing date range from API
-  fetch_start <- min(missing)
-  fetch_end <- max(missing)
-  cli::cli_alert_info("Fetching {length(missing)} days from Open-Meteo ({fetch_start} to {fetch_end})")
+  # Split missing dates into contiguous ranges to avoid re-fetching cached gaps
+  ranges <- split_contiguous(missing)
+  cli::cli_alert_info("Fetching {length(missing)} missing days in {length(ranges)} API call{?s}")
 
-  new_data <- fetch_open_meteo(coords$lat, coords$lon, fetch_start, fetch_end)
+  new_parts <- lapply(ranges, function(rng) {
+    fetch_open_meteo(coords$lat, coords$lon, rng[1], rng[length(rng)])
+  })
+  new_data <- data.table::rbindlist(new_parts, use.names = TRUE, fill = TRUE)
 
   # Merge with cache and save
   if (!is.null(cached)) {
@@ -47,8 +52,7 @@ fetch_weather <- function(lat, lon, start, end) {
   save_to_cache(all_data, coords$lat, coords$lon)
 
   cli::cli_alert_success("Got {length(requested)} days ({length(missing)} fetched, {length(requested) - length(missing)} cached)")
-  idx <- as.Date(all_data$date) >= as.Date(start) & as.Date(all_data$date) <= as.Date(end)
-  all_data[idx, ]
+  all_data[as.Date(all_data$date) >= start_d & as.Date(all_data$date) <= end_d, ]
 }
 
 #' Call Open-Meteo Historical Weather API

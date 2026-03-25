@@ -7,5 +7,7 @@
 \method{print}{wheather_comparison}(x, ...)
 }
 \description{
-Print method for wheather comparisons
+Prints the summary verdict. Returns a debug-friendly data.table
+invisibly, with raw weather values alongside component scores.
+Capture it with \code{dt <- print(result)} to inspect the scoring.
 }

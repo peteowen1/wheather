@@ -4,16 +4,14 @@
 \alias{save_to_cache}
 \title{Save weather data to the local cache}
 \usage{
-save_to_cache(data, lat, lon, date)
+save_to_cache(data, lat, lon)
 }
 \arguments{
-\item{data}{A data.table (single row) of daily weather data}
+\item{data}{A data.table of daily weather data}
 
 \item{lat}{Latitude}
 
 \item{lon}{Longitude}
-
-\item{date}{Date string (YYYY-MM-DD)}
 }
 \description{
 Save weather data to the local cache

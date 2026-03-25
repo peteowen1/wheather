@@ -61,7 +61,9 @@ batch_fetch <- function(cities,
   api_calls <- 0L
   skipped_calls <- 0L
   errors <- character(0)
-  current_delay <- delay
+  # Mutable state shared across closures — environment avoids assign() fragility
+  state <- new.env(parent = emptyenv())
+  state$delay <- delay
 
   for (i in seq_len(n)) {
     city_label <- paste0(cities$name[i], ", ", cities$country[i])
@@ -72,18 +74,22 @@ batch_fetch <- function(cities,
       cs <- as.character(chunks[[ch]]$start)
       ce <- as.character(chunks[[ch]]$end)
 
-      # fetch_weather handles cache internally — it only fetches missing dates
+      # Check if this chunk needs an API call (has uncached dates)
+      coords <- round_coords(cities$lat[i], cities$lon[i])
+      cached <- get_cached(coords$lat, coords$lon)
+      requested <- as.Date(date_seq(cs, ce))
+      needs_fetch <- is.null(cached) || !all(requested %in% as.Date(cached$date))
+
       result <- tryCatch({
         fetch_weather(cities$lat[i], cities$lon[i], cs, ce)
         "ok"
       }, error = function(e) {
         msg <- conditionMessage(e)
         if (grepl("429", msg, fixed = TRUE)) {
-          # Back off and retry once
-          backoff <- min(120, current_delay * 4)
+          backoff <- min(120, state$delay * 4)
           cli::cli_alert_warning("[{i}/{n}] {city_label} chunk {ch}: rate limited, waiting {round(backoff)}s")
           Sys.sleep(backoff)
-          current_delay <<- min(30, current_delay * 1.5)
+          state$delay <- min(30, state$delay * 1.5)
           tryCatch({
             fetch_weather(cities$lat[i], cities$lon[i], cs, ce)
             "ok"
@@ -94,16 +100,16 @@ batch_fetch <- function(cities,
       })
 
       if (identical(result, "ok")) {
-        api_calls <- api_calls + 1L
+        if (needs_fetch) api_calls <- api_calls + 1L
         city_fetched <- city_fetched + 1L
-        # Ease delay back down after success
-        current_delay <- max(delay, current_delay * 0.9)
+        if (!needs_fetch) skipped_calls <- skipped_calls + 1L
+        state$delay <- max(delay, state$delay * 0.9)
       } else {
         city_errors <- city_errors + 1L
         errors <- c(errors, paste0(city_label, " [", cs, "]: ", result))
       }
 
-      Sys.sleep(current_delay)
+      if (needs_fetch) Sys.sleep(state$delay)
     }
 
     if (city_errors == 0) {
@@ -120,7 +126,7 @@ batch_fetch <- function(cities,
 
   cli::cli_h2("Done")
   cli::cli_alert_success("Complete: {sum(status == 'complete')} | Partial: {sum(status == 'partial')} | Failed: {sum(status == 'error')}")
-  cli::cli_alert_info("API calls made: {api_calls}")
+  cli::cli_alert_info("API calls: {api_calls} | Cache hits: {skipped_calls}")
 
   if (length(errors) > 0) {
     cli::cli_h2("{length(errors)} chunk errors (re-run to retry)")

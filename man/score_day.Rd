@@ -14,9 +14,9 @@ score_day(day_data, weights = default_weights(), params = default_params())
 \item{params}{Scoring parameters (from \code{\link[=default_params]{default_params()}})}
 }
 \value{
-Named list: total, temp, rain, cloud, humidity, wind (all 0-100)
+Named list: total + component scores (all 0-100)
 }
 \description{
-Takes a single row of weather data (as from \code{\link[=fetch_day_summary]{fetch_day_summary()}})
+Takes a single row of weather data (as from \code{\link[=fetch_weather]{fetch_weather()}})
 and returns component scores plus a weighted total.
 }
