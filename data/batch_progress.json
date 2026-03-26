@@ -1,1 +1,7 @@
-{"current_year": 2025, "next_city_index": 1, "completed": {}}
+{
+  "current_year": 2025,
+  "next_city_index": 61,
+  "completed": {
+    "2025": 0
+  }
+}

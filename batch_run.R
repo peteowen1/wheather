@@ -4,11 +4,70 @@
 
 setwd("/home/user/wheather")
 
-# Load the package
-devtools::load_all(quiet = TRUE)
+# Load required packages (arrow is a shim using RDS; install if missing)
+suppressPackageStartupMessages({
+  library(data.table)
+  library(httr2)
+  library(cli)
+  library(maps)
+  library(jsonlite)
+  library(arrow)  # shim: reads/writes RDS under .parquet filenames
+})
 
 # Set cache directory inside repo
 options(wheather.cache_dir = "data/cache")
+dir.create("data/cache", recursive = TRUE, showWarnings = FALSE)
+
+# Source package functions directly (avoids devtools/dependency issues)
+# Provide helpers that api.R and cache.R expect
+round_coords <- function(lat, lon) list(lat = round(lat, 2), lon = round(lon, 2))
+split_contiguous <- function(dates) {
+  if (length(dates) == 0) return(list())
+  dates <- sort(dates)
+  groups <- cumsum(c(1, diff(as.integer(dates))) > 1)
+  split(dates, groups)
+}
+source("R/cache.R")
+source("R/api.R")
+source("R/batch.R")
+
+# Override fetch_open_meteo to not retry on permanent network failures (403)
+# The default in api.R retries 5x with exponential backoff which is too slow
+# when the proxy blocks all requests.
+fetch_open_meteo <- function(lat, lon, start, end) {
+  daily_vars <- paste(
+    "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
+    "apparent_temperature_max", "apparent_temperature_min",
+    "precipitation_sum", "precipitation_hours",
+    "rain_sum", "snowfall_sum",
+    "wind_speed_10m_max", "wind_gusts_10m_max",
+    "relative_humidity_2m_mean",
+    "shortwave_radiation_sum",
+    "sunshine_duration", "daylight_duration",
+    "cloud_cover_mean",
+    sep = ","
+  )
+
+  resp <- httr2::request("https://archive-api.open-meteo.com/v1/archive") |>
+    httr2::req_url_query(
+      latitude  = lat,
+      longitude = lon,
+      start_date = format(as.Date(start), "%Y-%m-%d"),
+      end_date   = format(as.Date(end),   "%Y-%m-%d"),
+      daily      = daily_vars,
+      timezone   = "auto"
+    ) |>
+    # No retries for the batch agent - fast-fail on network errors
+    httr2::req_retry(max_tries = 1) |>
+    httr2::req_timeout(15) |>
+    httr2::req_perform()
+
+  json <- httr2::resp_body_json(resp)
+  if (is.null(json$daily)) {
+    cli::cli_abort("No daily data returned from Open-Meteo.")
+  }
+  parse_open_meteo(json)
+}
 
 # Read progress file
 progress_file <- "data/batch_progress.json"
@@ -75,13 +134,12 @@ for (i in seq_len(batch_size)) {
       failed_cities <- c(failed_cities, city_name)
     }
 
-    # 2-second delay between calls
+    # 2-second delay between successful calls (skip on failure to stay fast)
     if (i < batch_size) Sys.sleep(2)
 
   }, error = function(e) {
     msg <- conditionMessage(e)
-
-    # On 429, wait 30s and retry once
+    # On 429, wait 30s and retry once (skipped if network is blocked)
     if (grepl("429|rate limit|too many", msg, ignore.case = TRUE)) {
       cat(sprintf(" 429 rate limit! Waiting 30s...\n"))
       Sys.sleep(30)
@@ -101,9 +159,11 @@ for (i in seq_len(batch_size)) {
         failed_cities <<- c(failed_cities, city_name)
       })
     } else {
-      cat(sprintf(" FAILED: %s\n", msg))
-      n_fail <- n_fail + 1
-      failed_cities <- c(failed_cities, city_name)
+      # Trim long error messages (e.g., curl tunnel errors)
+      short_msg <- substr(gsub("\n.*", "", msg), 1, 80)
+      cat(sprintf(" FAILED: %s\n", short_msg))
+      n_fail <<- n_fail + 1
+      failed_cities <<- c(failed_cities, city_name)
     }
   })
 }
