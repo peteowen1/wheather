@@ -6,3 +6,4 @@
 .Renviron
 .claude/
 debug/
+*.deb
