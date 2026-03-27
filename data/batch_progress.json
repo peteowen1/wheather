@@ -1,1 +1,1 @@
-{"current_year": 2025, "next_city_index": 1, "completed": {}}
+{"current_year": 2025, "next_city_index": 1, "completed": {}, "last_run": "2026-03-27", "last_run_status": "failed", "last_run_error": "Network proxy blocks api.open-meteo.com and CRAN; arrow package unavailable via apt"}
