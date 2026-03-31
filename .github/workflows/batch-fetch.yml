@@ -72,11 +72,16 @@ jobs:
           cat(sprintf("Fetching year=%d cities=%d-%d (%d cities)\n",
                       current_year, start_idx, end_idx, nrow(batch)))
 
-          n_success <- 0L
-          n_fail    <- 0L
+          n_success      <- 0L
+          n_fail         <- 0L
+          n_attempted    <- 0L
+          consecutive_429 <- 0L
+          quota_exhausted <- FALSE
 
           for (i in seq_len(nrow(batch))) {
             city_name <- paste0(batch$name[i], ", ", batch$country[i])
+            n_attempted <- n_attempted + 1L
+
             result <- tryCatch({
               fetch_weather(batch$lat[i], batch$lon[i], start_date, end_date)
               "ok"
@@ -96,17 +101,29 @@ jobs:
 
             if (identical(result, "ok")) {
               n_success <- n_success + 1L
+              consecutive_429 <- 0L
               cat(sprintf("  [%d/%d] OK: %s\n", i, nrow(batch), city_name))
             } else {
               n_fail <- n_fail + 1L
-              cat(sprintf("  [%d/%d] FAIL: %s — %s\n", i, nrow(batch), city_name, result))
+              if (grepl("429", result, fixed = TRUE)) {
+                consecutive_429 <- consecutive_429 + 1L
+                cat(sprintf("  [%d/%d] FAIL (429 #%d): %s\n", i, nrow(batch), consecutive_429, city_name))
+                if (consecutive_429 >= 3L) {
+                  cat("  !! 3 consecutive 429s — daily quota likely exhausted, stopping early\n")
+                  quota_exhausted <- TRUE
+                  break
+                }
+              } else {
+                consecutive_429 <- 0L
+                cat(sprintf("  [%d/%d] FAIL: %s — %s\n", i, nrow(batch), city_name, result))
+              }
             }
 
             Sys.sleep(2)
           }
 
-          # Update progress
-          new_idx <- start_idx + nrow(batch)
+          # Update progress — only advance by cities actually attempted
+          new_idx <- start_idx + n_attempted
           if (new_idx > 1000L) {
             new_idx  <- 1L
             new_year <- current_year - 1L
@@ -124,10 +141,11 @@ jobs:
           progress$current_year    <- new_year
           progress$next_city_index <- new_idx
           progress$last_run        <- as.character(Sys.Date())
-          progress$last_run_status <- if (n_fail == 0) "ok" else "partial"
+          progress$last_run_status <- if (quota_exhausted) "quota_exhausted" else if (n_fail == 0) "ok" else "partial"
           progress$last_run_summary <- sprintf(
-            "year=%d cities=%d-%d success=%d fail=%d",
-            current_year, start_idx, end_idx, n_success, n_fail
+            "year=%d cities=%d-%d success=%d fail=%d%s",
+            current_year, start_idx, start_idx + n_attempted - 1L, n_success, n_fail,
+            if (quota_exhausted) " [stopped: quota exhausted]" else ""
           )
 
           dir.create("data", showWarnings = FALSE)
