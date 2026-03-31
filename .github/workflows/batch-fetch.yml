@@ -1,0 +1,154 @@
+name: Batch Weather Fetch
+
+on:
+  schedule:
+    - cron: '0 17 * * *'  # 3am AEST (UTC+10) = 5pm UTC
+  workflow_dispatch:       # allow manual trigger from GitHub UI
+
+jobs:
+  batch-fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: 'release'
+          use-public-rspm: true
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            httr2
+            data.table
+            arrow
+            cli
+            maps
+            devtools
+
+      - name: Run batch fetch
+        run: |
+          Rscript - <<'EOF'
+          devtools::load_all()
+          options(wheather.cache_dir = "data/cache")
+
+          progress_file <- "data/batch_progress.json"
+          if (!file.exists(progress_file)) {
+            progress <- list(current_year = 2025L, next_city_index = 1L, completed = list())
+          } else {
+            progress <- jsonlite::fromJSON(progress_file, simplifyVector = FALSE)
+            progress$current_year <- as.integer(progress$current_year)
+            progress$next_city_index <- as.integer(progress$next_city_index)
+          }
+
+          current_year <- progress$current_year
+          start_idx    <- progress$next_city_index
+
+          # Stop if we've passed 2015
+          if (current_year < 2015L) {
+            cat("All years complete (reached before 2015). Nothing to do.\n")
+            quit(status = 0)
+          }
+
+          cities <- top_cities(1000)
+          end_idx <- min(start_idx + 59L, 1000L)
+          batch   <- cities[start_idx:end_idx, ]
+
+          start_date <- paste0(current_year, "-01-01")
+          end_date   <- if (current_year == as.integer(format(Sys.Date(), "%Y"))) {
+            as.character(Sys.Date() - 1)
+          } else {
+            paste0(current_year, "-12-31")
+          }
+
+          cat(sprintf("Fetching year=%d cities=%d-%d (%d cities)\n",
+                      current_year, start_idx, end_idx, nrow(batch)))
+
+          n_success <- 0L
+          n_fail    <- 0L
+
+          for (i in seq_len(nrow(batch))) {
+            city_name <- paste0(batch$name[i], ", ", batch$country[i])
+            result <- tryCatch({
+              fetch_weather(batch$lat[i], batch$lon[i], start_date, end_date)
+              "ok"
+            }, error = function(e) {
+              msg <- conditionMessage(e)
+              if (grepl("429", msg, fixed = TRUE)) {
+                cat(sprintf("  [%d/%d] %s: rate limited, waiting 30s\n", i, nrow(batch), city_name))
+                Sys.sleep(30)
+                tryCatch({
+                  fetch_weather(batch$lat[i], batch$lon[i], start_date, end_date)
+                  "ok"
+                }, error = function(e2) conditionMessage(e2))
+              } else {
+                msg
+              }
+            })
+
+            if (identical(result, "ok")) {
+              n_success <- n_success + 1L
+              cat(sprintf("  [%d/%d] OK: %s\n", i, nrow(batch), city_name))
+            } else {
+              n_fail <- n_fail + 1L
+              cat(sprintf("  [%d/%d] FAIL: %s — %s\n", i, nrow(batch), city_name, result))
+            }
+
+            Sys.sleep(2)
+          }
+
+          # Update progress
+          new_idx <- start_idx + nrow(batch)
+          if (new_idx > 1000L) {
+            new_idx  <- 1L
+            new_year <- current_year - 1L
+          } else {
+            new_year <- current_year
+          }
+
+          year_key <- as.character(current_year)
+          prev_done <- if (!is.null(progress$completed[[year_key]])) {
+            as.integer(progress$completed[[year_key]])
+          } else {
+            0L
+          }
+          progress$completed[[year_key]] <- prev_done + n_success
+          progress$current_year    <- new_year
+          progress$next_city_index <- new_idx
+          progress$last_run        <- as.character(Sys.Date())
+          progress$last_run_status <- if (n_fail == 0) "ok" else "partial"
+          progress$last_run_summary <- sprintf(
+            "year=%d cities=%d-%d success=%d fail=%d",
+            current_year, start_idx, end_idx, n_success, n_fail
+          )
+
+          dir.create("data", showWarnings = FALSE)
+          jsonlite::write_json(progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
+
+          cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
+                      n_success, n_fail, current_year, start_idx, end_idx))
+
+          # Write commit message to file for next step
+          writeLines(
+            sprintf("batch-fetch: %d cities %d-%d (%d ok, %d failed)",
+                    current_year, start_idx, end_idx, n_success, n_fail),
+            "data/.commit_msg"
+          )
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          COMMIT_MSG=$(cat data/.commit_msg)
+          git diff --cached --quiet || git commit -m "$COMMIT_MSG"
+          git push
