@@ -65,6 +65,8 @@ Uses bslib (Bootstrap 5, "flatly" theme). Three tabs: Overview (verdict + timeli
 
 **Scheduled agent** (`wheather-batch-fetch`): A Claude Code remote trigger runs daily at 3am Sydney time, fetching 60 cities × 1 year per run. It tracks progress in `data/batch_progress.json`, caches parquet files in `data/cache/`, and commits/pushes after each run. Working backwards from 2025 to 2015. Manage at: https://claude.ai/code/scheduled
 
+> **CURRENT STATUS (stalled):** The batch agent is presently blocked — the proxy allowlist does not permit `open-meteo.com`, so every run fails its Open-Meteo fetch (`last_run_error` 403). Progress has been stuck for ~8 weeks (around 2024, cities 361-420) and will not advance until the proxy allows `open-meteo.com`.
+
 **Open-Meteo rate limits** are weighted, not per-request: `weight = max(vars/10, vars/10 * days/7)`. With 16 variables, 1 year ≈ 83 call-equivalents. Free tier = 10,000/day, so ~120 city-years per day max. Keep batch sizes ≤60 cities per run.
 
 ## Scoring System (v2)
