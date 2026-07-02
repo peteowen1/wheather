@@ -1,16 +1,16 @@
 {
   "current_year": 2020,
-  "next_city_index": 481,
+  "next_city_index": 541,
   "completed": {
     "2025": 996,
     "2024": 1000,
     "2023": 1000,
     "2022": 940,
     "2021": 1000,
-    "2020": 479
+    "2020": 539
   },
-  "last_run": "2026-07-01",
+  "last_run": "2026-07-02",
   "last_run_status": "ok",
   "last_run_error": "Network proxy blocks archive-api.open-meteo.com (403 Forbidden, x-deny-reason: host_not_allowed). open-meteo.com is not in the proxy allowlist. No data fetched. Re-run when proxy allows open-meteo.com.",
-  "last_run_summary": "year=2020 cities=421-480 success=60 fail=0"
+  "last_run_summary": "year=2020 cities=481-540 success=60 fail=0"
 }
