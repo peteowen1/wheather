@@ -1,4 +1,4 @@
-# wheather 0.1.3
+# wheather 0.1.4
 
 Repository made public. Batch pipeline reworked after a review found it was
 losing city-years silently.
@@ -22,7 +22,18 @@ losing city-years silently.
 * `completed` counts are derived from the Parquet files rather than tallied as
   runs succeed, so they cannot drift from actual coverage.
 * `last_run_error` is rewritten every run and records every distinct failure
-  reason, not just the first.
+  reason, rather than only the first.
+* A retry-queue overflow permanently drops city-years, so it is now recorded in
+  `last_run_error` instead of only warning to the run log.
+* Restored the cap that stops the fetcher requesting dates past the archive's
+  multi-day lag when working on an in-progress calendar year. The inline copy in
+  the workflow had this guard and the merged script briefly lost it.
+* Fixed two pointer bugs found while building the queue: an entry present in both
+  the queue and the new range was counted twice and skipped a city, and retries
+  selected for a run but never reached by the 429 circuit breaker were dropped
+  entirely.
+* `tools/test_batch_queue.R` covers the queue and pointer logic against a stubbed
+  fetcher, including both circuit-breaker paths.
 
 ## Data
 
