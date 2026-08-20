@@ -6,3 +6,8 @@
 .Renviron
 .claude/
 debug/
+
+# Weather cache and CI scratch — data lives on the 'cache' GitHub Release,
+# not in git history. See .github/workflows/batch-fetch.yml.
+data/cache/
+data/.commit_msg
