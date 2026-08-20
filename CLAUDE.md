@@ -66,7 +66,13 @@ To work with the cache locally: `gh release download cache --pattern cache.tar.g
 
 **Progress accounting.** `data/batch_progress.json` is the only thing committed (to `dev`). If a run succeeds for zero cities, the pointer **holds** rather than advancing — a systematic failure (proxy block, quota, outage) must not march through the city list leaving gaps nothing retries. **Partial failures are still skipped:** when some cities succeed, the pointer advances past the ones that did not, and they are recorded only in `last_run_error`. There is no retry queue yet, so a `partial` status is a signal to re-run those cities by hand. `last_run_error` is rewritten on every run that reaches the progress write, so it cannot disagree with `last_run_status`, and it records every distinct failure reason rather than only the first. The one exception is the terminal `current_year < 2015` path, which `quit()`s before writing anything and leaves the last value in place.
 
-> **CURRENT STATUS:** Progress sits at 2024, cities 421-1000 outstanding. Earlier runs through the Claude remote trigger were blocked by a proxy allowlist that does not permit `open-meteo.com` (403). The GitHub Actions workflow does not go through that proxy; if a run still fails, `last_run_status` will read `failed` and the pointer will hold at 421 rather than skipping the batch.
+> **CURRENT STATUS (2026-08-20):** Progress sits at **2017, city 181**. 2018-2025 are complete apart from the gaps below. The pipeline is running normally.
+>
+> **Read the pointer from `main`, not from your checkout.** `data/batch_progress.json` is written by CI on every run, so a `dev` branch can sit a hundred-plus runs behind and make the pipeline look stalled when it is not. That misreading happened on 2026-08-20 and very nearly published a one-year-old cache snapshot over nine years of data.
+>
+> **Known gaps, caused by the pointer bug this branch fixes:** `completed` reads 2022=940 (commit `f1fed20`, cities 181-240, all 60 failed and the pointer advanced anyway), 2020=999, 2018=999, 2025=996. Re-filling them means resetting `current_year` / `next_city_index` by hand and letting a run pass over that range; `fetch_weather()` only requests dates it does not already have, so a re-run is cheap and idempotent.
+>
+> The Claude Code remote trigger (`batch_run.R`) is separately blocked by a proxy allowlist that does not permit `open-meteo.com` (403). That block does not affect the GitHub Actions run, which is what has been making progress.
 
 **Open-Meteo rate limits** are weighted, not per-request: `weight = max(vars/10, vars/10 * days/7)`. With 16 variables, 1 year ≈ 83 call-equivalents. Free tier = 10,000/day, so ~120 city-years per day max. Keep batch sizes ≤60 cities per run.
 
