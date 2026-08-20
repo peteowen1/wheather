@@ -34,7 +34,7 @@ wheather::run_app()
 
 1. **R/locations.R** — `geocode()` resolves city names to lat/lon. `resolve_location()` accepts either city name or lat/lon. Built-in table of 15 cities + Open-Meteo geocoding fallback.
 2. **R/api.R** — `fetch_weather()` checks Parquet cache first, fetches only missing dates from Open-Meteo's Historical Weather API, merges, and re-caches. 5 retries with exponential backoff on 429s.
-3. **R/cache.R** — Parquet files at `~/.wheather/cache/{lat}_{lon}.parquet` (configurable via `options(wheather.cache_dir)`). Uses `arrow::ReadableFile` (not mmap) to avoid Windows file-locking.
+3. **R/cache.R** — Parquet files at `{cache_dir}/{lat}_{lon}.parquet`, where `cache_dir()` defaults to `tools::R_user_dir("wheather", "cache")` — the OS user-cache directory, **not** `~/.wheather/cache` (configurable via `options(wheather.cache_dir)`). Uses `arrow::ReadableFile` (not mmap) to avoid Windows file-locking.
 4. **R/score.R** — Five `score_*()` functions (temp, rain, sky, humidity, wind), combined by `weighted_total()` with NA renormalisation. `score_period()` adds `score_*` columns to the data.table.
 5. **R/compare.R** — `compare_periods()` and `compare_cities()` both accept city names. Shared `build_comparison()` helper. Returns S3 `wheather_comparison` with `print()` method that returns a debug data.table invisibly.
 6. **R/batch.R** — `top_cities(n)` from `maps::world.cities`. `batch_fetch()` handles rate limits, backoff, and progress tracking.
@@ -66,7 +66,7 @@ To work with the cache locally: `gh release download cache --pattern cache.tar.g
 
 **Progress accounting.** `data/batch_progress.json` is the only thing committed (to `dev`). If a run succeeds for zero cities, the pointer **holds** rather than advancing — a systematic failure (proxy block, quota, outage) must not march through the city list leaving gaps nothing retries. **Partial failures are still skipped:** when some cities succeed, the pointer advances past the ones that did not, and they are recorded only in `last_run_error`. There is no retry queue yet, so a `partial` status is a signal to re-run those cities by hand. `last_run_error` is rewritten on every run that reaches the progress write, so it cannot disagree with `last_run_status`, and it records every distinct failure reason rather than only the first. The one exception is the terminal `current_year < 2015` path, which `quit()`s before writing anything and leaves the last value in place.
 
-> **CURRENT STATUS (2026-08-20):** Progress sits at **2017, city 181**. 2018-2025 are complete apart from the gaps below. The pipeline is running normally.
+> **CURRENT STATUS (2026-08-20):** The pipeline is running normally, working through 2017. Read the live position from `completed` / `next_city_index` in `data/batch_progress.json` rather than trusting a number written here — it moves every day.
 >
 > **Read the pointer from the branch CI writes to, after fetching — never from a local checkout.** `data/batch_progress.json` moves on every run. Before this change CI wrote it to `main`; from this change on it writes to `dev`, so `main` is the copy that goes stale between merges. Either way a checkout can sit a hundred-plus runs behind and make the pipeline look stalled when it is not — that misreading happened on 2026-08-20 and very nearly published a one-year-old cache snapshot over nine years of data. `git fetch` first, then read `origin/dev:data/batch_progress.json`.
 >

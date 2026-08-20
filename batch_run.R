@@ -8,7 +8,9 @@
 # parquet cache from the 'cache' release and has a 429 circuit breaker. The two
 # have drifted; do not assume a fix here reaches CI.
 
-setwd("/home/user/wheather")
+# The remote trigger runs from a fixed sandbox path; anywhere else, run from
+# the repo root and this is a no-op rather than a hard failure.
+if (dir.exists("/home/user/wheather")) setwd("/home/user/wheather")
 
 # Load the package
 devtools::load_all(quiet = TRUE)
