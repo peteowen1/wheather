@@ -138,10 +138,18 @@ reasons   <- character(0)
 consecutive_429 <- 0L
 quota_exhausted <- FALSE
 
+# Never request past yesterday. The archive lags real time by several days, so
+# asking for the rest of an in-progress year returns nothing useful and would
+# cache a short year as though it were complete. The old inline copy in the
+# workflow had this guard; it must not be lost with it.
+year_end <- function(year) {
+  min(as.Date(sprintf("%d-12-31", year)), Sys.Date() - 1)
+}
+
 fetch_one <- function(idx, year) {
   tryCatch({
     fetch_weather(cities$lat[idx], cities$lon[idx],
-                  sprintf("%d-01-01", year), sprintf("%d-12-31", year))
+                  sprintf("%d-01-01", year), as.character(year_end(year)))
     "ok"
   }, error = function(e) conditionMessage(e))
 }
@@ -214,11 +222,27 @@ if (n_success == 0L) {
 }
 
 # Anything that failed goes back on the queue, ahead of whatever did not fit
-# this run. Nothing is dropped silently.
-new_queue <- c(failed, queue_tail)
+# this run.
+#
+# The 429 circuit breaker can stop the loop with selected retries still
+# unreached. Those are in none of `attempted`, `failed` or `queue_tail`, so
+# without this they would be dropped entirely - the same silent loss this file
+# exists to prevent. Unattempted NEW work needs no such rescue: the pointer
+# only advances over what was attempted, so it is picked up again next run.
+work_keys  <- vapply(work, queue_key, character(1))
+retry_keys <- if (length(retry_take)) vapply(retry_take, queue_key, character(1)) else character(0)
+stranded   <- work[!(work_keys %in% attempted) & (work_keys %in% retry_keys)]
+if (length(stranded)) {
+  cat(sprintf("Preserving %d selected retries the run never reached.\n", length(stranded)))
+}
+
+new_queue <- c(failed, stranded, queue_tail)
+n_dropped <- 0L
 if (length(new_queue) > QUEUE_CAP) {
-  cat(sprintf("WARNING: retry queue at %d entries, capping to %d. Investigate - this means failures are outpacing retries.\n",
-              length(new_queue), QUEUE_CAP))
+  # Keep this run's failures; drop the oldest untouched backlog.
+  n_dropped <- length(new_queue) - QUEUE_CAP
+  cat(sprintf("WARNING: retry queue at %d entries, dropping the %d oldest. Failures are outpacing retries - investigate.\n",
+              length(new_queue), n_dropped))
   new_queue <- new_queue[seq_len(QUEUE_CAP)]
 }
 
@@ -247,9 +271,16 @@ progress$last_run_summary <- sprintf(
 # Always rewritten, so a stale error cannot survive into a report about a run
 # that did not produce it. Distinct reasons, not just the first: a benign
 # one-off ahead of a systematic failure would otherwise be all anyone sees.
-progress$last_run_error <- if (n_fail > 0L) {
-  substr(paste(unique(reasons), collapse = " | "), 1L, 2000L)
-} else ""
+progress$last_run_error <- {
+  parts <- character(0)
+  if (n_dropped > 0L) {
+    # A truncation permanently drops city-years. A warning that lives only in
+    # one day's Action log is a silent failure by another name.
+    parts <- c(parts, sprintf("QUEUE OVERFLOW: dropped %d entries from the retry queue", n_dropped))
+  }
+  if (n_fail > 0L) parts <- c(parts, paste(unique(reasons), collapse = " | "))
+  substr(paste(parts, collapse = " || "), 1L, 2000L)
+}
 
 dir.create("data", showWarnings = FALSE)
 jsonlite::write_json(progress, PROGRESS_FILE, auto_unbox = TRUE, pretty = TRUE)

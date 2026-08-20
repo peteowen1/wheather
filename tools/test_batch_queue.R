@@ -17,7 +17,8 @@ setup <- function(progress) {
 }
 
 # `fail_on` is a set of "year:index" keys the stub should fail for.
-run_case <- function(name, progress, fail_on = character(0), slots = 10L, expect) {
+run_case <- function(name, progress, fail_on = character(0), fail_429_on = character(0),
+                     slots = 10L, expect) {
   setup(progress)
   old <- setwd(SANDBOX); on.exit(setwd(old), add = TRUE)
 
@@ -31,11 +32,16 @@ run_case <- function(name, progress, fail_on = character(0), slots = 10L, expect
                            lat = seq_len(n) / 100, lon = seq_len(n) / 100)
   }, envir = globalenv())
   assign("FAIL_ON", fail_on, envir = globalenv())
+  assign("FAIL_429_ON", fail_429_on, envir = globalenv())
   assign("fetch_weather", function(lat, lon, start, end) {
     idx <- as.integer(round(lat * 100))
     yr  <- as.integer(substr(start, 1, 4))
-    if (paste0(yr, ":", idx) %in% get("FAIL_ON", envir = globalenv())) {
-      stop("stubbed failure for ", yr, ":", idx)
+    key <- paste0(yr, ":", idx)
+    if (key %in% get("FAIL_429_ON", envir = globalenv())) {
+      stop("HTTP 429 Too Many Requests for ", key)
+    }
+    if (key %in% get("FAIL_ON", envir = globalenv())) {
+      stop("stubbed failure for ", key)
     }
     data.table::data.table(date = as.Date(paste0(yr, "-01-01")))
   }, envir = globalenv())
@@ -99,7 +105,26 @@ results <- c(
            list(current_year = 2020L, next_city_index = 1L, completed = list(),
                 retry_queue = list(list(year = 2020L, index = 3L))),
            fail_on = "2020:3",
-           expect = list(year = 2020L, idx = 10L, status = "partial", queue = 1L))
+           expect = list(year = 2020L, idx = 10L, status = "partial", queue = 1L)),
+
+  # Regression test. The 429 breaker stops the loop after 3 consecutive rate
+  # limits, leaving queued retries 4 and 5 selected but never reached. They were
+  # in none of attempted/failed/queue_tail and were silently dropped.
+  run_case("429 breaker: unreached retries are NOT lost",
+           list(current_year = 2020L, next_city_index = 50L, completed = list(),
+                retry_queue = lapply(1:5, function(i) list(year = 2020L, index = i))),
+           fail_429_on = paste0("2020:", 1:5),
+           expect = list(year = 2020L, idx = 50L, status = "quota_exhausted",
+                         queue = 5L)),
+
+  # The breaker firing part-way through NEW work must not advance the pointer
+  # past cities it never attempted.
+  run_case("429 breaker mid-new-work: pointer covers only what ran",
+           list(current_year = 2020L, next_city_index = 1L, completed = list(),
+                retry_queue = list()),
+           fail_429_on = paste0("2020:", 1:5),
+           expect = list(year = 2020L, idx = 1L, status = "quota_exhausted",
+                         queue = 3L))
 )
 
 cat(sprintf("\n%d/%d passed\n", sum(results), length(results)))
