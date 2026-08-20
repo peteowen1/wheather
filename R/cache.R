@@ -1,7 +1,10 @@
 #' Get the cache directory path
 #'
-#' Defaults to ~/.wheather/cache, configurable via
-#' options(wheather.cache_dir = "...").
+#' Defaults to `tools::R_user_dir("wheather", "cache")`, which resolves to the
+#' OS-specific user cache directory - `~/.cache/R/wheather` on Linux,
+#' `~/Library/Caches/org.R-project.R/R/wheather` on macOS, and
+#' `%LOCALAPPDATA%/R/cache/R/wheather` on Windows. Override with
+#' `options(wheather.cache_dir = "...")`.
 #'
 #' @return Path string
 #' @export

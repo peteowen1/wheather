@@ -67,8 +67,11 @@ Open-Meteo data is licensed **[CC BY 4.0](https://creativecommons.org/licenses/b
 The cached data published by this repository is derived from it and carries the same
 attribution requirement — if you use it, credit Open-Meteo and ECMWF/Copernicus.
 
-Responses are cached as Parquet under `~/.wheather/cache` (configurable via
-`options(wheather.cache_dir)`), so re-running a comparison costs no API calls.
+Responses are cached as Parquet in the OS user-cache directory returned by
+`tools::R_user_dir("wheather", "cache")` — `~/.cache/R/wheather` on Linux,
+`~/Library/Caches/org.R-project.R/R/wheather` on macOS, `%LOCALAPPDATA%\R\cache\R\wheather`
+on Windows. Override it with `options(wheather.cache_dir = "...")`. Re-running a
+comparison costs no API calls.
 
 ### Bulk cache
 
@@ -81,9 +84,20 @@ gh release download cache --pattern cache.tar.gz --repo peteowen1/wheather
 tar -xzf cache.tar.gz -C data     # lands at data/cache/{lat}_{lon}.parquet
 ```
 
-Coverage as of August 2026: 2018-2025 complete for ~1000 cities, 2017 in progress.
-A handful of city-years are missing where an early version of the batch job advanced
-its progress pointer past failed runs; see `CLAUDE.md` for the specifics.
+Coverage as of August 2026, out of 1000 cities per year:
+
+| Year | Cities | Note |
+|---|---|---|
+| 2019, 2021, 2023, 2024 | 1000 | complete |
+| 2018, 2020 | 999 | one city short |
+| 2025 | 996 | four short |
+| 2022 | 940 | **60 short** — one batch failed wholesale |
+| 2017 | in progress | backfilling now |
+
+The gaps exist because an earlier version of the batch job advanced its progress
+pointer past runs that had failed, so those city-years were never retried. That bug is
+fixed; the gaps it left are not yet backfilled. `data/batch_progress.json` carries the
+live counts.
 
 ## Development
 
@@ -98,5 +112,5 @@ devtools::check()
 
 ## License
 
-MIT, see [LICENSE](LICENSE). This covers the code; the cached weather data is CC BY 4.0
-as described above.
+MIT — full text in [LICENSE.md](LICENSE.md); `LICENSE` is the two-line stub R packaging
+expects. This covers the code; the cached weather data is CC BY 4.0 as described above.

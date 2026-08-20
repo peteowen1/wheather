@@ -10,6 +10,9 @@ cache_dir()
 Path string
 }
 \description{
-Defaults to ~/.wheather/cache, configurable via
-options(wheather.cache_dir = "...").
+Defaults to \code{tools::R_user_dir("wheather", "cache")}, which resolves to the
+OS-specific user cache directory - \verb{~/.cache/R/wheather} on Linux,
+\verb{~/Library/Caches/org.R-project.R/R/wheather} on macOS, and
+\verb{\%LOCALAPPDATA\%/R/cache/R/wheather} on Windows. Override with
+\code{options(wheather.cache_dir = "...")}.
 }
