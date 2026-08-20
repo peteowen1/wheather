@@ -84,20 +84,15 @@ gh release download cache --pattern cache.tar.gz --repo peteowen1/wheather
 tar -xzf cache.tar.gz -C data     # lands at data/cache/{lat}_{lon}.parquet
 ```
 
-Coverage as of August 2026, out of 1000 cities per year:
+Coverage as of August 2026: **2018-2025 complete** — 1000 cities × 8 years, every
+year a full 365 (or 366) days. 2017 is in progress.
 
-| Year | Cities | Note |
-|---|---|---|
-| 2019, 2021, 2023, 2024 | 1000 | complete |
-| 2018, 2020 | 999 | one city short |
-| 2025 | 996 | four short |
-| 2022 | 940 | **60 short** — one batch failed wholesale |
-| 2017 | in progress | backfilling now |
-
-The gaps exist because an earlier version of the batch job advanced its progress
-pointer past runs that had failed, so those city-years were never retried. That bug is
-fixed; the gaps it left are not yet backfilled. `data/batch_progress.json` carries the
-live counts.
+Earlier versions of this table listed gaps in 2018, 2020, 2022 and 2025. They came from
+a bug where the batch job advanced its progress pointer past runs that had failed, so
+those city-years were never retried — 2022 was 60 cities short on its own. The bug is
+fixed and the 66 missing city-years have been backfilled and verified against the
+Parquet files themselves rather than against the job's own counters.
+`data/batch_progress.json` carries the live counts.
 
 ## Development
 
