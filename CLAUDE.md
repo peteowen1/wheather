@@ -68,7 +68,7 @@ To work with the cache locally: `gh release download cache --pattern cache.tar.g
 
 > **CURRENT STATUS (2026-08-20):** Progress sits at **2017, city 181**. 2018-2025 are complete apart from the gaps below. The pipeline is running normally.
 >
-> **Read the pointer from `main`, not from your checkout.** `data/batch_progress.json` is written by CI on every run, so a `dev` branch can sit a hundred-plus runs behind and make the pipeline look stalled when it is not. That misreading happened on 2026-08-20 and very nearly published a one-year-old cache snapshot over nine years of data.
+> **Read the pointer from the branch CI writes to, after fetching — never from a local checkout.** `data/batch_progress.json` moves on every run. Before this change CI wrote it to `main`; from this change on it writes to `dev`, so `main` is the copy that goes stale between merges. Either way a checkout can sit a hundred-plus runs behind and make the pipeline look stalled when it is not — that misreading happened on 2026-08-20 and very nearly published a one-year-old cache snapshot over nine years of data. `git fetch` first, then read `origin/dev:data/batch_progress.json`.
 >
 > **Known gaps, caused by the pointer bug this branch fixes:** `completed` reads 2022=940 (commit `f1fed20`, cities 181-240, all 60 failed and the pointer advanced anyway), 2020=999, 2018=999, 2025=996. Re-filling them means resetting `current_year` / `next_city_index` by hand and letting a run pass over that range; `fetch_weather()` only requests dates it does not already have, so a re-run is cheap and idempotent.
 >
