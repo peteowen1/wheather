@@ -1,183 +1,298 @@
 #!/usr/bin/env Rscript
-# Batch weather data fetcher for wheather package
-# Fetches 60 cities x 1 year per run.
 #
-# NOTE: this is the standalone script for the Claude Code remote trigger. The
-# scheduled GitHub Actions run uses its own inline copy in
-# .github/workflows/batch-fetch.yml, which additionally restores/publishes the
-# parquet cache from the 'cache' release and has a 429 circuit breaker. The two
-# have drifted; do not assume a fix here reaches CI.
+# Batch weather fetcher — the single implementation.
+#
+# Run by .github/workflows/batch-fetch.yml and by the Claude Code remote
+# trigger. There used to be two copies of this logic, this file and an inline
+# heredoc in the workflow; they drifted, and only one of them had the 429
+# circuit breaker. Do not reintroduce a second copy.
+#
+# MUST be run from the repo root - every path here is relative and this script
+# deliberately does not setwd() (setwd inside an Rscript segfaults on this
+# setup; see C:/dev/.claude/rules/r-datatable-gotchas.md). CI runs it from the
+# checkout root; the remote trigger must cd first.
+#
+# Reads and writes data/batch_progress.json. Expects the parquet cache at
+# data/cache — in CI that is restored from the 'cache' release before this runs
+# and re-published after.
 
-# The remote trigger runs from a fixed sandbox path; anywhere else, run from
-# the repo root and this is a no-op rather than a hard failure.
-if (dir.exists("/home/user/wheather")) setwd("/home/user/wheather")
+suppressMessages(devtools::load_all(quiet = TRUE))
+library(data.table)
 
-# Load the package
-devtools::load_all(quiet = TRUE)
+# --- configuration -----------------------------------------------------------
 
-# Set cache directory inside repo
-options(wheather.cache_dir = "data/cache")
+SLOTS               <- as.integer(Sys.getenv("WHEATHER_BATCH_SLOTS", "60"))
+N_CITIES            <- 1000L
+STOP_YEAR           <- 2015L   # backfill runs backwards and stops before this
+DELAY_SECONDS       <- as.numeric(Sys.getenv("WHEATHER_BATCH_DELAY", "2"))
+RETRY_429_WAIT      <- as.numeric(Sys.getenv("WHEATHER_BATCH_429_WAIT", "30"))
+MAX_CONSECUTIVE_429 <- 3L
+QUEUE_CAP           <- 1000L   # refuse to let the retry queue grow without bound
 
-# Read progress file
-progress_file <- "data/batch_progress.json"
-if (file.exists(progress_file)) {
-  progress <- jsonlite::fromJSON(progress_file)
-} else {
-  progress <- list(current_year = 2025, next_city_index = 1, completed = list())
+CACHE_DIR     <- "data/cache"
+PROGRESS_FILE <- "data/batch_progress.json"
+COMMIT_MSG    <- "data/.commit_msg"
+
+options(wheather.cache_dir = CACHE_DIR)
+
+# --- progress file -----------------------------------------------------------
+
+read_progress <- function() {
+  if (!file.exists(PROGRESS_FILE)) {
+    return(list(current_year = 2025L, next_city_index = 1L,
+                completed = list(), retry_queue = list()))
+  }
+  p <- jsonlite::fromJSON(PROGRESS_FILE, simplifyVector = FALSE)
+  p$current_year    <- as.integer(p$current_year)
+  p$next_city_index <- as.integer(p$next_city_index)
+  if (is.null(p$completed))   p$completed   <- list()
+  if (is.null(p$retry_queue)) p$retry_queue <- list()
+  p
 }
 
-current_year <- progress$current_year
-next_city_index <- progress$next_city_index
-completed <- progress$completed
+# Queue entries carry their own year. Indices alone would be ambiguous the
+# moment the pointer rolls over into the next year, and a failure from 2022
+# must not be retried against 2021.
+queue_entry  <- function(year, index) list(year = as.integer(year), index = as.integer(index))
+queue_key    <- function(e) paste0(e$year, ":", e$index)
 
-cat(sprintf("Starting batch fetch: year=%d, starting at city index=%d\n",
-            current_year, next_city_index))
+# --- coverage ----------------------------------------------------------------
 
-# Stop if we've gone past 2015
-if (current_year < 2015) {
-  cat("All years complete (reached 2015). Nothing to do.\n")
-  quit(status = 0)
-}
-
-# Get top 1000 cities
-cities <- top_cities(1000)
-cat(sprintf("Total cities available: %d\n", nrow(cities)))
-
-# Select batch of 60
-end_idx <- min(next_city_index + 59, nrow(cities))
-batch <- cities[next_city_index:end_idx, ]
-batch_size <- nrow(batch)
-cat(sprintf("Fetching %d cities (indices %d-%d) for year %d\n",
-            batch_size, next_city_index, end_idx, current_year))
-
-# Set date range
-start_date <- sprintf("%d-01-01", current_year)
-if (current_year == as.integer(format(Sys.Date(), "%Y"))) {
-  end_date <- format(Sys.Date() - 1, "%Y-%m-%d")
-} else {
-  end_date <- sprintf("%d-12-31", current_year)
-}
-cat(sprintf("Date range: %s to %s\n", start_date, end_date))
-
-# Fetch each city
-n_success <- 0
-n_fail <- 0
-failed_cities <- character(0)
-# Reason strings, not just names: "3 cities failed: Tokyo, ..." gives an
-# operator no way to tell a 403 proxy block from a 429 from a parse error.
-fail_reasons <- character(0)
-
-for (i in seq_len(batch_size)) {
-  city <- batch[i, ]
-  city_name <- paste0(city$name, ", ", city$country)
-
+# `completed` used to be a running tally of successes, which drifts from reality
+# whenever a run is lost — that is exactly how the 2022 gap stayed invisible.
+# Derive it from the files instead, and fall back to the tally only if the scan
+# itself fails.
+derive_completed <- function(fallback) {
   tryCatch({
-    cat(sprintf("[%d/%d] Fetching %s (%.2f, %.2f)...",
-                i, batch_size, city_name, city$lat, city$lon))
-
-    result <- fetch_weather(city$lat, city$lon, start_date, end_date)
-
-    if (!is.null(result) && nrow(result) > 0) {
-      cat(sprintf(" OK (%d days)\n", nrow(result)))
-      n_success <- n_success + 1
-    } else {
-      cat(" EMPTY\n")
-      n_fail <- n_fail + 1
-      failed_cities <- c(failed_cities, city_name)
-      fail_reasons <- c(fail_reasons, "empty result (0 rows)")
-    }
-
-    # 2-second delay between calls
-    if (i < batch_size) Sys.sleep(2)
-
+    files <- list.files(CACHE_DIR, pattern = "\\.parquet$", full.names = TRUE)
+    if (!length(files)) return(fallback)
+    cov <- rbindlist(lapply(files, function(f) {
+      rf <- arrow::ReadableFile$create(f)
+      on.exit(rf$close(), add = TRUE)
+      dt <- as.data.table(arrow::read_parquet(rf, col_select = "date"))
+      if (!nrow(dt)) return(NULL)
+      unique(dt[, .(year = as.integer(format(as.Date(date), "%Y")))])
+    }), use.names = TRUE)
+    if (!nrow(cov)) return(fallback)
+    tally <- cov[, .N, by = year][order(-year)]
+    out <- as.list(setNames(as.integer(tally$N), as.character(tally$year)))
+    cat(sprintf("Derived coverage from %d cache files\n", length(files)))
+    out
   }, error = function(e) {
-    msg <- conditionMessage(e)
-
-    # On 429, wait 30s and retry once
-    if (grepl("429|rate limit|too many", msg, ignore.case = TRUE)) {
-      cat(sprintf(" 429 rate limit! Waiting 30s...\n"))
-      Sys.sleep(30)
-      tryCatch({
-        result <- fetch_weather(city$lat, city$lon, start_date, end_date)
-        if (!is.null(result) && nrow(result) > 0) {
-          cat(sprintf("[%d/%d] Retry %s OK (%d days)\n", i, batch_size, city_name, nrow(result)))
-          n_success <<- n_success + 1
-        } else {
-          cat(sprintf("[%d/%d] Retry %s EMPTY\n", i, batch_size, city_name))
-          n_fail <<- n_fail + 1
-          failed_cities <<- c(failed_cities, city_name)
-          fail_reasons <<- c(fail_reasons, "empty result after 429 retry")
-        }
-      }, error = function(e2) {
-        cat(sprintf("[%d/%d] Retry %s FAILED: %s\n", i, batch_size, city_name, conditionMessage(e2)))
-        n_fail <<- n_fail + 1
-        failed_cities <<- c(failed_cities, city_name)
-        fail_reasons <<- c(fail_reasons, conditionMessage(e2))
-      })
-    } else {
-      cat(sprintf(" FAILED: %s\n", msg))
-      n_fail <<- n_fail + 1
-      failed_cities <<- c(failed_cities, city_name)
-      fail_reasons <<- c(fail_reasons, msg)
-    }
+    cat(sprintf("WARNING: coverage scan failed (%s); keeping the previous counts\n",
+                conditionMessage(e)))
+    fallback
   })
 }
 
-# Update progress — hold the pointer if nothing succeeded, so a systematic
-# failure (proxy block, quota exhaustion, outage) can't march silently through
-# the city list leaving permanent gaps that no later run retries.
-if (n_success == 0) {
-  new_next_idx <- next_city_index
-  new_year <- current_year
-  cat("\nNo cities succeeded — holding progress pointer for retry.\n")
-} else {
-  new_next_idx <- end_idx + 1
-  if (new_next_idx > nrow(cities)) {
-    # Finished this year, move to next
-    new_next_idx <- 1
-    new_year <- current_year - 1
-    cat(sprintf("\nCompleted year %d! Moving to year %d.\n", current_year, new_year))
+# --- work selection ----------------------------------------------------------
+
+progress   <- read_progress()
+start_idx  <- progress$next_city_index
+year_now   <- progress$current_year
+
+if (year_now < STOP_YEAR) {
+  cat(sprintf("All years complete (reached before %d). Nothing to do.\n", STOP_YEAR))
+  quit(status = 0)
+}
+
+cities <- top_cities(N_CITIES)
+
+# Retries come first and consume slots, so a backlog drains instead of growing
+# while the pointer runs ahead of it.
+queue      <- progress$retry_queue
+retry_take <- if (length(queue)) queue[seq_len(min(length(queue), SLOTS))] else list()
+queue_tail <- if (length(queue) > length(retry_take)) queue[-seq_along(retry_take)] else list()
+
+free_slots <- SLOTS - length(retry_take)
+new_take <- list()
+if (free_slots > 0L && start_idx <= N_CITIES) {
+  end_idx <- min(start_idx + free_slots - 1L, N_CITIES)
+  new_take <- lapply(start_idx:end_idx, function(i) queue_entry(year_now, i))
+}
+
+new_keys <- vapply(new_take, queue_key, character(1))
+
+# A queued entry can also fall inside this run's new range. Fetch it once:
+# fetching twice is only wasteful, but counting it twice over-advances the
+# pointer and skips a city, which is the whole class of bug this file exists
+# to stop.
+work <- c(retry_take, new_take)
+work <- work[!duplicated(vapply(work, queue_key, character(1)))]
+
+cat(sprintf("Year %d, pointer at city %d | %d retries + %d new = %d to fetch\n",
+            year_now, start_idx, length(retry_take), length(new_take), length(work)))
+
+if (!length(work)) {
+  cat("Nothing to fetch this run.\n")
+  quit(status = 0)
+}
+
+# --- fetch -------------------------------------------------------------------
+
+n_success <- 0L
+n_fail    <- 0L
+attempted <- character(0)
+failed    <- list()
+reasons   <- character(0)
+consecutive_429 <- 0L
+quota_exhausted <- FALSE
+
+# Never request past yesterday. The archive lags real time by several days, so
+# asking for the rest of an in-progress year returns nothing useful and would
+# cache a short year as though it were complete. The old inline copy in the
+# workflow had this guard; it must not be lost with it.
+year_end <- function(year) {
+  min(as.Date(sprintf("%d-12-31", year)), Sys.Date() - 1)
+}
+
+fetch_one <- function(idx, year) {
+  tryCatch({
+    fetch_weather(cities$lat[idx], cities$lon[idx],
+                  sprintf("%d-01-01", year), as.character(year_end(year)))
+    "ok"
+  }, error = function(e) conditionMessage(e))
+}
+
+for (i in seq_along(work)) {
+  item  <- work[[i]]
+  idx   <- item$index
+  year  <- item$year
+  label <- sprintf("%s, %s [%d]", cities$name[idx], cities$country[idx], year)
+
+  result <- fetch_one(idx, year)
+
+  if (grepl("429", result, fixed = TRUE)) {
+    cat(sprintf("  [%d/%d] %s: rate limited, waiting %ds\n",
+                i, length(work), label, RETRY_429_WAIT))
+    Sys.sleep(RETRY_429_WAIT)
+    result <- fetch_one(idx, year)
+  }
+
+  attempted <- c(attempted, queue_key(item))
+
+  if (identical(result, "ok")) {
+    n_success <- n_success + 1L
+    consecutive_429 <- 0L
+    cat(sprintf("  [%d/%d] OK: %s\n", i, length(work), label))
   } else {
-    new_year <- current_year
+    n_fail  <- n_fail + 1L
+    failed  <- c(failed, list(item))
+    reasons <- c(reasons, result)
+    if (grepl("429", result, fixed = TRUE)) {
+      consecutive_429 <- consecutive_429 + 1L
+      cat(sprintf("  [%d/%d] FAIL (429 #%d): %s\n",
+                  i, length(work), consecutive_429, label))
+      if (consecutive_429 >= MAX_CONSECUTIVE_429) {
+        cat(sprintf("  !! %d consecutive 429s - quota likely exhausted, stopping early\n",
+                    MAX_CONSECUTIVE_429))
+        quota_exhausted <- TRUE
+        break
+      }
+    } else {
+      consecutive_429 <- 0L
+      cat(sprintf("  [%d/%d] FAIL: %s - %s\n", i, length(work), label, result))
+    }
+  }
+
+  Sys.sleep(DELAY_SECONDS)
+}
+
+# --- advance the pointer -----------------------------------------------------
+
+# Only new work moves the pointer; retries are already behind it. Count
+# DISTINCT new keys, so an overlap between the queue and the new range cannot
+# inflate the advance.
+n_new_attempted <- length(intersect(unique(attempted), new_keys))
+
+if (n_success == 0L) {
+  # A systematic failure (proxy block, quota, outage) must not march through the
+  # city list. Hold everything and let the next run try the same range.
+  new_idx  <- start_idx
+  new_year <- year_now
+  cat("No cities succeeded - holding the pointer for retry.\n")
+} else {
+  new_idx  <- start_idx + n_new_attempted
+  new_year <- year_now
+  if (new_idx > N_CITIES) {
+    new_idx  <- 1L
+    new_year <- year_now - 1L
+    cat(sprintf("Finished year %d, moving to %d.\n", year_now, new_year))
   }
 }
 
-# Update completed count
-completed_key <- as.character(current_year)
-if (!is.null(completed[[completed_key]])) {
-  completed[[completed_key]] <- completed[[completed_key]] + n_success
-} else {
-  completed[[completed_key]] <- n_success
+# Anything that failed goes back on the queue, ahead of whatever did not fit
+# this run.
+#
+# The 429 circuit breaker can stop the loop with selected retries still
+# unreached. Those are in none of `attempted`, `failed` or `queue_tail`, so
+# without this they would be dropped entirely - the same silent loss this file
+# exists to prevent. Unattempted NEW work needs no such rescue: the pointer
+# only advances over what was attempted, so it is picked up again next run.
+work_keys  <- vapply(work, queue_key, character(1))
+retry_keys <- if (length(retry_take)) vapply(retry_take, queue_key, character(1)) else character(0)
+stranded   <- work[!(work_keys %in% attempted) & (work_keys %in% retry_keys)]
+if (length(stranded)) {
+  cat(sprintf("Preserving %d selected retries the run never reached.\n", length(stranded)))
 }
 
-new_progress <- list(
-  current_year = new_year,
-  next_city_index = new_next_idx,
-  completed = completed,
-  last_run = as.character(Sys.Date()),
-  last_run_status = if (n_success == 0) "failed" else if (n_fail > 0) "partial" else "ok",
-  last_run_summary = sprintf("year=%d cities=%d-%d success=%d fail=%d",
-                             current_year, next_city_index, end_idx, n_success, n_fail),
-  # Rewritten on every run that reaches this point, so it cannot disagree
-  # with last_run_status. Distinct reasons rather than the first one only, so
-  # a benign one-off failure cannot mask a systematic one behind it.
-  last_run_error = if (n_fail > 0) {
-    substr(sprintf("%d failed. %s", n_fail,
-                   paste(unique(fail_reasons), collapse = " | ")), 1L, 2000L)
-  } else {
-    ""
+new_queue <- c(failed, stranded, queue_tail)
+n_dropped <- 0L
+if (length(new_queue) > QUEUE_CAP) {
+  # Keep this run's failures; drop the oldest untouched backlog.
+  n_dropped <- length(new_queue) - QUEUE_CAP
+  cat(sprintf("WARNING: retry queue at %d entries, dropping the %d oldest. Failures are outpacing retries - investigate.\n",
+              length(new_queue), n_dropped))
+  new_queue <- new_queue[seq_len(QUEUE_CAP)]
+}
+
+# --- write progress ----------------------------------------------------------
+
+progress$completed       <- derive_completed(progress$completed)
+progress$current_year    <- new_year
+progress$next_city_index <- new_idx
+progress$retry_queue     <- new_queue
+progress$cache_files     <- length(list.files(CACHE_DIR, pattern = "\\.parquet$"))
+progress$last_run        <- as.character(Sys.Date())
+progress$last_run_status <- if (quota_exhausted) {
+  "quota_exhausted"
+} else if (n_success == 0L) {
+  "failed"
+} else if (n_fail > 0L) {
+  "partial"
+} else {
+  "ok"
+}
+progress$last_run_summary <- sprintf(
+  "year=%d attempted=%d (%d new, %d retry) success=%d fail=%d queue=%d%s",
+  year_now, length(attempted), n_new_attempted,
+  length(attempted) - n_new_attempted, n_success, n_fail, length(new_queue),
+  if (quota_exhausted) " [stopped: quota exhausted]" else "")
+# Always rewritten, so a stale error cannot survive into a report about a run
+# that did not produce it. Distinct reasons, not just the first: a benign
+# one-off ahead of a systematic failure would otherwise be all anyone sees.
+progress$last_run_error <- {
+  parts <- character(0)
+  if (n_dropped > 0L) {
+    # A truncation permanently drops city-years. A warning that lives only in
+    # one day's Action log is a silent failure by another name.
+    parts <- c(parts, sprintf("QUEUE OVERFLOW: dropped %d entries from the retry queue", n_dropped))
   }
+  if (n_fail > 0L) parts <- c(parts, paste(unique(reasons), collapse = " | "))
+  substr(paste(parts, collapse = " || "), 1L, 2000L)
+}
+
+dir.create("data", showWarnings = FALSE)
+jsonlite::write_json(progress, PROGRESS_FILE, auto_unbox = TRUE, pretty = TRUE)
+
+writeLines(
+  sprintf("batch-fetch: %d (%d ok, %d failed, %d queued)",
+          year_now, n_success, n_fail, length(new_queue)),
+  COMMIT_MSG
 )
 
-jsonlite::write_json(new_progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
-
-# Print summary
-cat(sprintf("\n=== BATCH COMPLETE ===\n"))
-cat(sprintf("Year: %d\n", current_year))
-cat(sprintf("Cities: %d-%d (%d total)\n", next_city_index, end_idx, batch_size))
-cat(sprintf("Success: %d\n", n_success))
-cat(sprintf("Failed: %d\n", n_fail))
-if (length(failed_cities) > 0) {
-  cat(sprintf("Failed cities: %s\n", paste(failed_cities, collapse = ", ")))
-}
-cat(sprintf("Next run: year=%d, starting at city=%d\n", new_year, new_next_idx))
+cat(sprintf("\n=== %s ===\n", toupper(progress$last_run_status)))
+cat(progress$last_run_summary, "\n")
+if (n_fail > 0L) cat("reasons:", progress$last_run_error, "\n")
+cat(sprintf("next run: year=%d city=%d, %d queued for retry\n",
+            new_year, new_idx, length(new_queue)))

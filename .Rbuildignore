@@ -3,3 +3,4 @@
 ^\.Renviron\.example$
 ^LICENSE\.md$
 ^inst/quarto$
+^tools$

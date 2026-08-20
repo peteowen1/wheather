@@ -2,7 +2,7 @@ name: Batch Weather Fetch
 
 on:
   schedule:
-    - cron: '0 17 * * *'  # 3am AEST (UTC+10) = 5pm UTC
+    - cron: '0 17 * * *'  # 17:00 UTC daily = 3am AEST / 4am AEDT
   workflow_dispatch:       # allow manual trigger from GitHub UI
 
 jobs:
@@ -45,12 +45,11 @@ jobs:
       # The parquet cache is data, so it lives on the 'cache' release, not in
       # git history.
       #
-      # The expected file count comes from the COMMITTED progress file, not
-      # from the release API. That matters: a failed `gh` query and a genuinely
-      # absent asset are indistinguishable from the API alone, so trusting it
-      # would let a transient outage restore nothing, then publish that nothing
-      # over a good archive. Cold start is only legitimate when the committed
-      # count is 0.
+      # The expected file count comes from the COMMITTED progress file, not from
+      # the release API. That matters: a failed `gh` query and a genuinely absent
+      # asset are indistinguishable from the API alone, so trusting it would let
+      # a transient outage restore nothing, then publish that nothing over a good
+      # archive. Cold start is only legitimate when the committed count is 0.
       - name: Restore weather cache from release
         run: |
           set -euo pipefail
@@ -77,168 +76,10 @@ jobs:
           echo "CACHE_FILES_BEFORE=$ACTUAL" >> "$GITHUB_ENV"
           echo "Restored $ACTUAL cached city files (expected at least $EXPECTED)"
 
+      # One implementation, in batch_run.R. This step used to carry a second
+      # copy inline; the two drifted and only one had the 429 circuit breaker.
       - name: Run batch fetch
-        run: |
-          Rscript - <<'EOF'
-          devtools::load_all()
-          options(wheather.cache_dir = "data/cache")
-
-          progress_file <- "data/batch_progress.json"
-          if (!file.exists(progress_file)) {
-            progress <- list(current_year = 2025L, next_city_index = 1L, completed = list())
-          } else {
-            progress <- jsonlite::fromJSON(progress_file, simplifyVector = FALSE)
-            progress$current_year <- as.integer(progress$current_year)
-            progress$next_city_index <- as.integer(progress$next_city_index)
-          }
-
-          current_year <- progress$current_year
-          start_idx    <- progress$next_city_index
-
-          # Stop if we've passed 2015
-          if (current_year < 2015L) {
-            cat("All years complete (reached before 2015). Nothing to do.\n")
-            quit(status = 0)
-          }
-
-          cities <- top_cities(1000)
-          end_idx <- min(start_idx + 59L, 1000L)
-          batch   <- cities[start_idx:end_idx, ]
-
-          start_date <- paste0(current_year, "-01-01")
-          end_date   <- if (current_year == as.integer(format(Sys.Date(), "%Y"))) {
-            as.character(Sys.Date() - 1)
-          } else {
-            paste0(current_year, "-12-31")
-          }
-
-          cat(sprintf("Fetching year=%d cities=%d-%d (%d cities)\n",
-                      current_year, start_idx, end_idx, nrow(batch)))
-
-          n_success       <- 0L
-          n_fail          <- 0L
-          n_attempted     <- 0L
-          consecutive_429 <- 0L
-          quota_exhausted <- FALSE
-          fail_reasons    <- character(0)
-
-          for (i in seq_len(nrow(batch))) {
-            city_name <- paste0(batch$name[i], ", ", batch$country[i])
-            n_attempted <- n_attempted + 1L
-
-            result <- tryCatch({
-              fetch_weather(batch$lat[i], batch$lon[i], start_date, end_date)
-              "ok"
-            }, error = function(e) {
-              msg <- conditionMessage(e)
-              if (grepl("429", msg, fixed = TRUE)) {
-                cat(sprintf("  [%d/%d] %s: rate limited, waiting 30s\n", i, nrow(batch), city_name))
-                Sys.sleep(30)
-                tryCatch({
-                  fetch_weather(batch$lat[i], batch$lon[i], start_date, end_date)
-                  "ok"
-                }, error = function(e2) conditionMessage(e2))
-              } else {
-                msg
-              }
-            })
-
-            if (identical(result, "ok")) {
-              n_success <- n_success + 1L
-              consecutive_429 <- 0L
-              cat(sprintf("  [%d/%d] OK: %s\n", i, nrow(batch), city_name))
-            } else {
-              n_fail <- n_fail + 1L
-              fail_reasons <- c(fail_reasons, paste0(city_name, ": ", result))
-              if (grepl("429", result, fixed = TRUE)) {
-                consecutive_429 <- consecutive_429 + 1L
-                cat(sprintf("  [%d/%d] FAIL (429 #%d): %s\n", i, nrow(batch), consecutive_429, city_name))
-                if (consecutive_429 >= 3L) {
-                  cat("  !! 3 consecutive 429s - daily quota likely exhausted, stopping early\n")
-                  quota_exhausted <- TRUE
-                  break
-                }
-              } else {
-                consecutive_429 <- 0L
-                cat(sprintf("  [%d/%d] FAIL: %s - %s\n", i, nrow(batch), city_name, result))
-              }
-            }
-
-            Sys.sleep(2)
-          }
-
-          # Update progress - hold the pointer if nothing succeeded, so a
-          # systematic failure (proxy block, quota, outage) cannot march
-          # silently through the city list leaving permanent gaps that no
-          # later run retries.
-          if (n_success == 0L) {
-            new_idx  <- start_idx
-            new_year <- current_year
-            cat("No cities succeeded - holding progress pointer for retry.\n")
-          } else {
-            new_idx <- start_idx + n_attempted
-            if (new_idx > 1000L) {
-              new_idx  <- 1L
-              new_year <- current_year - 1L
-            } else {
-              new_year <- current_year
-            }
-          }
-
-          year_key <- as.character(current_year)
-          prev_done <- if (!is.null(progress$completed[[year_key]])) {
-            as.integer(progress$completed[[year_key]])
-          } else {
-            0L
-          }
-          progress$completed[[year_key]] <- prev_done + n_success
-          progress$current_year    <- new_year
-          progress$next_city_index <- new_idx
-          progress$last_run        <- as.character(Sys.Date())
-          progress$last_run_status <- if (quota_exhausted) {
-            "quota_exhausted"
-          } else if (n_success == 0L) {
-            "failed"
-          } else if (n_fail > 0L) {
-            "partial"
-          } else {
-            "ok"
-          }
-          progress$last_run_summary <- sprintf(
-            "year=%d cities=%d-%d success=%d fail=%d%s",
-            current_year, start_idx, start_idx + n_attempted - 1L, n_success, n_fail,
-            if (quota_exhausted) " [stopped: quota exhausted]" else ""
-          )
-          # Rewritten on every run that reaches this point, so it cannot
-          # disagree with last_run_status. Keeps every DISTINCT reason, not
-          # just the first: a benign one-off failure ahead of a systematic one
-          # would otherwise be all the operator ever sees.
-          progress$last_run_error <- if (n_fail > 0L) {
-            substr(paste(unique(fail_reasons), collapse = " | "), 1L, 2000L)
-          } else {
-            ""
-          }
-          # The restore step compares this against what it actually unpacked.
-          progress$cache_files <- length(list.files("data/cache", pattern = "\\.parquet$"))
-
-          dir.create("data", showWarnings = FALSE)
-          jsonlite::write_json(progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
-
-          # The range actually attempted, which is shorter than the batch when
-          # the 429 circuit breaker fires. Reporting end_idx here would claim
-          # cities that were never touched.
-          last_attempted <- start_idx + n_attempted - 1L
-
-          cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
-                      n_success, n_fail, current_year, start_idx, last_attempted))
-
-          # Commit message for the commit step (a gitignored scratch artifact)
-          writeLines(
-            sprintf("batch-fetch: %d cities %d-%d (%d ok, %d failed)",
-                    current_year, start_idx, last_attempted, n_success, n_fail),
-            "data/.commit_msg"
-          )
-          EOF
+        run: Rscript batch_run.R
 
       - name: Publish weather cache to release
         run: |
@@ -258,8 +99,8 @@ jobs:
           set -euo pipefail
           # No commit message means the fetch script exited before doing any
           # work - the terminal "all years complete" path does exactly that.
-          # Without this guard the bare `cat` below fails under `set -e` and
-          # the workflow goes permanently red once the backfill finishes.
+          # Without this guard the bare `cat` below fails under `set -e` and the
+          # workflow goes permanently red once the backfill finishes.
           if [ ! -f data/.commit_msg ]; then
             echo "No commit message written - nothing to commit."
             exit 0
