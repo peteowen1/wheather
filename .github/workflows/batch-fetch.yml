@@ -13,8 +13,13 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: dev
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -22,7 +27,9 @@ jobs:
           use-public-rspm: true
 
       - name: Install system dependencies
-        run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -32,7 +39,26 @@ jobs:
             arrow
             cli
             maps
+            jsonlite
             devtools
+
+      # The parquet cache is data, so it lives on the 'cache' release, not in
+      # git history. Restoring it must be all-or-nothing: silently starting
+      # cold would let the upload step clobber the release with a near-empty
+      # archive.
+      - name: Restore weather cache from release
+        run: |
+          set -euo pipefail
+          mkdir -p data/cache
+          if gh release view cache --json assets --jq '.assets[].name' | grep -qx cache.tar.gz; then
+            gh release download cache --pattern cache.tar.gz --dir .
+            tar -xzf cache.tar.gz -C data
+            rm cache.tar.gz
+          else
+            echo "No cache.tar.gz on the 'cache' release yet - starting cold."
+          fi
+          echo "CACHE_FILES_BEFORE=$(ls data/cache | wc -l)" >> "$GITHUB_ENV"
+          echo "Restored $(ls data/cache | wc -l) cached city files"
 
       - name: Run batch fetch
         run: |
@@ -72,11 +98,12 @@ jobs:
           cat(sprintf("Fetching year=%d cities=%d-%d (%d cities)\n",
                       current_year, start_idx, end_idx, nrow(batch)))
 
-          n_success      <- 0L
-          n_fail         <- 0L
-          n_attempted    <- 0L
+          n_success       <- 0L
+          n_fail          <- 0L
+          n_attempted     <- 0L
           consecutive_429 <- 0L
           quota_exhausted <- FALSE
+          fail_reasons    <- character(0)
 
           for (i in seq_len(nrow(batch))) {
             city_name <- paste0(batch$name[i], ", ", batch$country[i])
@@ -105,30 +132,40 @@ jobs:
               cat(sprintf("  [%d/%d] OK: %s\n", i, nrow(batch), city_name))
             } else {
               n_fail <- n_fail + 1L
+              fail_reasons <- c(fail_reasons, paste0(city_name, ": ", result))
               if (grepl("429", result, fixed = TRUE)) {
                 consecutive_429 <- consecutive_429 + 1L
                 cat(sprintf("  [%d/%d] FAIL (429 #%d): %s\n", i, nrow(batch), consecutive_429, city_name))
                 if (consecutive_429 >= 3L) {
-                  cat("  !! 3 consecutive 429s — daily quota likely exhausted, stopping early\n")
+                  cat("  !! 3 consecutive 429s - daily quota likely exhausted, stopping early\n")
                   quota_exhausted <- TRUE
                   break
                 }
               } else {
                 consecutive_429 <- 0L
-                cat(sprintf("  [%d/%d] FAIL: %s — %s\n", i, nrow(batch), city_name, result))
+                cat(sprintf("  [%d/%d] FAIL: %s - %s\n", i, nrow(batch), city_name, result))
               }
             }
 
             Sys.sleep(2)
           }
 
-          # Update progress — only advance by cities actually attempted
-          new_idx <- start_idx + n_attempted
-          if (new_idx > 1000L) {
-            new_idx  <- 1L
-            new_year <- current_year - 1L
-          } else {
+          # Update progress - hold the pointer if nothing succeeded, so a
+          # systematic failure (proxy block, quota, outage) cannot march
+          # silently through the city list leaving permanent gaps that no
+          # later run retries.
+          if (n_success == 0L) {
+            new_idx  <- start_idx
             new_year <- current_year
+            cat("No cities succeeded - holding progress pointer for retry.\n")
+          } else {
+            new_idx <- start_idx + n_attempted
+            if (new_idx > 1000L) {
+              new_idx  <- 1L
+              new_year <- current_year - 1L
+            } else {
+              new_year <- current_year
+            }
           }
 
           year_key <- as.character(current_year)
@@ -141,12 +178,27 @@ jobs:
           progress$current_year    <- new_year
           progress$next_city_index <- new_idx
           progress$last_run        <- as.character(Sys.Date())
-          progress$last_run_status <- if (quota_exhausted) "quota_exhausted" else if (n_fail == 0) "ok" else "partial"
+          progress$last_run_status <- if (quota_exhausted) {
+            "quota_exhausted"
+          } else if (n_success == 0L) {
+            "failed"
+          } else if (n_fail > 0L) {
+            "partial"
+          } else {
+            "ok"
+          }
           progress$last_run_summary <- sprintf(
             "year=%d cities=%d-%d success=%d fail=%d%s",
             current_year, start_idx, start_idx + n_attempted - 1L, n_success, n_fail,
             if (quota_exhausted) " [stopped: quota exhausted]" else ""
           )
+          # Always written, so a stale error from an earlier run can never
+          # survive into a report about this one.
+          progress$last_run_error <- if (n_fail > 0L) {
+            sprintf("%d of %d cities failed. First: %s", n_fail, n_attempted, fail_reasons[1])
+          } else {
+            ""
+          }
 
           dir.create("data", showWarnings = FALSE)
           jsonlite::write_json(progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
@@ -154,7 +206,7 @@ jobs:
           cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
                       n_success, n_fail, current_year, start_idx, end_idx))
 
-          # Write commit message to file for next step
+          # Commit message for the commit step (a gitignored scratch artifact)
           writeLines(
             sprintf("batch-fetch: %d cities %d-%d (%d ok, %d failed)",
                     current_year, start_idx, end_idx, n_success, n_fail),
@@ -162,11 +214,25 @@ jobs:
           )
           EOF
 
-      - name: Commit and push
+      - name: Publish weather cache to release
         run: |
+          set -euo pipefail
+          AFTER=$(ls data/cache | wc -l)
+          if [ "$AFTER" -lt "$CACHE_FILES_BEFORE" ]; then
+            echo "::error::Cache shrank ($CACHE_FILES_BEFORE -> $AFTER); refusing to clobber the release asset."
+            exit 1
+          fi
+          tar -czf cache.tar.gz -C data cache
+          gh release upload cache cache.tar.gz --clobber
+          rm cache.tar.gz
+          echo "Published $AFTER cached city files to the 'cache' release"
+
+      - name: Commit progress
+        run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/batch_progress.json
           COMMIT_MSG=$(cat data/.commit_msg)
           git diff --cached --quiet || git commit -m "$COMMIT_MSG"
-          git push
+          git push origin dev

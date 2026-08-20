@@ -43,14 +43,6 @@ wheather::run_app()
 
 Uses bslib (Bootstrap 5, "flatly" theme). Three tabs: Overview (verdict + timeline), Components (bar chart + faceted timelines), Data (DT table). Weight sliders are in the sidebar; weights should sum to 1.0 (validated with a warning).
 
-### Key Dependencies
-
-- `httr2` for API calls (with retry)
-- `data.table` throughout (not tibble/dplyr)
-- `arrow` for Parquet cache I/O
-- `cli` for user-facing messages
-- `ggplot2`, `shiny`, `bslib`, `bsicons`, `DT` for the app
-
 ## Conventions
 
 - **data.table idiom everywhere** — use `:=`, `.SD`, `rbindlist`, etc. Do not introduce dplyr.
@@ -63,9 +55,18 @@ Uses bslib (Bootstrap 5, "flatly" theme). Three tabs: Overview (verdict + timeli
 
 `top_cities(1000)` returns the 1000 most populated cities worldwide (from the `maps` package). `batch_fetch()` fetches historical weather for multiple cities with rate-limit handling.
 
-**Scheduled agent** (`wheather-batch-fetch`): A Claude Code remote trigger runs daily at 3am Sydney time, fetching 60 cities × 1 year per run. It tracks progress in `data/batch_progress.json`, caches parquet files in `data/cache/`, and commits/pushes after each run. Working backwards from 2025 to 2015. Manage at: https://claude.ai/code/scheduled
+**Scheduled run** (`.github/workflows/batch-fetch.yml`): runs daily at 3am Sydney time, fetching 60 cities × 1 year per run, working backwards from 2025 to 2015. Manage at: https://claude.ai/code/scheduled
 
-> **CURRENT STATUS (stalled):** The batch agent is presently blocked — the proxy allowlist does not permit `open-meteo.com`, so every run fails its Open-Meteo fetch (`last_run_error` 403). Progress has been stuck for ~8 weeks (around 2024, cities 361-420) and will not advance until the proxy allows `open-meteo.com`.
+**Where the data lives.** The parquet cache is **not in git** — it is a single `cache.tar.gz` asset on the `cache` GitHub Release, per the release-as-data-bus pattern. Each run restores it, fetches, and re-uploads with `--clobber`. Two consequences worth knowing:
+
+- The release `createdAt` is meaningless; check the **asset** `updatedAt`.
+- The restore step hard-fails rather than starting cold, and the upload step refuses to publish a cache with fewer files than it restored. Both exist so a transient download failure cannot clobber the release with an empty archive.
+
+To work with the cache locally: `gh release download cache --pattern cache.tar.gz && tar -xzf cache.tar.gz -C data`.
+
+**Progress accounting.** `data/batch_progress.json` is the only thing committed (to `dev`). If a run succeeds for zero cities, the pointer **holds** rather than advancing — a systematic failure (proxy block, quota, outage) must not march through the city list leaving gaps nothing retries. `last_run_error` is rewritten every run, so it is never stale.
+
+> **CURRENT STATUS:** Progress sits at 2024, cities 421-1000 outstanding. Earlier runs through the Claude remote trigger were blocked by a proxy allowlist that does not permit `open-meteo.com` (403). The GitHub Actions workflow does not go through that proxy; if a run still fails, `last_run_status` will read `failed` and the pointer will hold at 421 rather than skipping the batch.
 
 **Open-Meteo rate limits** are weighted, not per-request: `weight = max(vars/10, vars/10 * days/7)`. With 16 variables, 1 year ≈ 83 call-equivalents. Free tier = 10,000/day, so ~120 city-years per day max. Keep batch sizes ≤60 cities per run.
 

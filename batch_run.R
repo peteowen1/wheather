@@ -102,21 +102,29 @@ for (i in seq_len(batch_size)) {
       })
     } else {
       cat(sprintf(" FAILED: %s\n", msg))
-      n_fail <- n_fail + 1
-      failed_cities <- c(failed_cities, city_name)
+      n_fail <<- n_fail + 1
+      failed_cities <<- c(failed_cities, city_name)
     }
   })
 }
 
-# Update progress
-new_next_idx <- end_idx + 1
-if (new_next_idx > nrow(cities)) {
-  # Finished this year, move to next
-  new_next_idx <- 1
-  new_year <- current_year - 1
-  cat(sprintf("\nCompleted year %d! Moving to year %d.\n", current_year, new_year))
-} else {
+# Update progress — hold the pointer if nothing succeeded, so a systematic
+# failure (proxy block, quota exhaustion, outage) can't march silently through
+# the city list leaving permanent gaps that no later run retries.
+if (n_success == 0) {
+  new_next_idx <- next_city_index
   new_year <- current_year
+  cat("\nNo cities succeeded — holding progress pointer for retry.\n")
+} else {
+  new_next_idx <- end_idx + 1
+  if (new_next_idx > nrow(cities)) {
+    # Finished this year, move to next
+    new_next_idx <- 1
+    new_year <- current_year - 1
+    cat(sprintf("\nCompleted year %d! Moving to year %d.\n", current_year, new_year))
+  } else {
+    new_year <- current_year
+  }
 }
 
 # Update completed count
@@ -130,7 +138,20 @@ if (!is.null(completed[[completed_key]])) {
 new_progress <- list(
   current_year = new_year,
   next_city_index = new_next_idx,
-  completed = completed
+  completed = completed,
+  last_run = as.character(Sys.Date()),
+  last_run_status = if (n_success == 0) "failed" else if (n_fail > 0) "partial" else "ok",
+  last_run_summary = sprintf("year=%d cities=%d-%d success=%d fail=%d",
+                             current_year, next_city_index, end_idx, n_success, n_fail),
+  # Always written, so a stale error from an earlier run can never survive
+  # into a report about this one.
+  last_run_error = if (length(failed_cities) > 0) {
+    sprintf("%d cities failed: %s%s", length(failed_cities),
+            paste(head(failed_cities, 5), collapse = ", "),
+            if (length(failed_cities) > 5) ", ..." else "")
+  } else {
+    ""
+  }
 )
 
 jsonlite::write_json(new_progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
