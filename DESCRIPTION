@@ -1,6 +1,6 @@
 Package: wheather
 Title: Compare Weather Quality Across Years
-Version: 0.1.2
+Version: 0.1.3
 Authors@R:
     person("Pete", "O", role = c("aut", "cre"), email = "pete@example.com")
 Description: Was this summer's weather actually better than last year's?
