@@ -13,8 +13,13 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: dev
 
       - uses: r-lib/actions/setup-r@v2
         with:
@@ -22,7 +27,9 @@ jobs:
           use-public-rspm: true
 
       - name: Install system dependencies
-        run: sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev libxml2-dev
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
@@ -32,7 +39,43 @@ jobs:
             arrow
             cli
             maps
+            jsonlite
             devtools
+
+      # The parquet cache is data, so it lives on the 'cache' release, not in
+      # git history.
+      #
+      # The expected file count comes from the COMMITTED progress file, not
+      # from the release API. That matters: a failed `gh` query and a genuinely
+      # absent asset are indistinguishable from the API alone, so trusting it
+      # would let a transient outage restore nothing, then publish that nothing
+      # over a good archive. Cold start is only legitimate when the committed
+      # count is 0.
+      - name: Restore weather cache from release
+        run: |
+          set -euo pipefail
+          mkdir -p data/cache
+          EXPECTED=$(jq -r '.cache_files // 0' data/batch_progress.json)
+
+          if gh release download cache --pattern cache.tar.gz --dir . 2> restore-err.log; then
+            tar -xzf cache.tar.gz -C data
+            rm cache.tar.gz
+          elif [ "$EXPECTED" -eq 0 ]; then
+            echo "No cache asset and none expected - starting cold."
+            cat restore-err.log
+          else
+            echo "::error::Cache restore failed while $EXPECTED files were expected: $(cat restore-err.log)"
+            exit 1
+          fi
+          rm -f restore-err.log
+
+          ACTUAL=$(ls data/cache | wc -l)
+          if [ "$ACTUAL" -lt "$EXPECTED" ]; then
+            echo "::error::Restored $ACTUAL cache files but $EXPECTED were expected. Refusing to continue - publishing from here would shrink the release asset."
+            exit 1
+          fi
+          echo "CACHE_FILES_BEFORE=$ACTUAL" >> "$GITHUB_ENV"
+          echo "Restored $ACTUAL cached city files (expected at least $EXPECTED)"
 
       - name: Run batch fetch
         run: |
@@ -72,11 +115,12 @@ jobs:
           cat(sprintf("Fetching year=%d cities=%d-%d (%d cities)\n",
                       current_year, start_idx, end_idx, nrow(batch)))
 
-          n_success      <- 0L
-          n_fail         <- 0L
-          n_attempted    <- 0L
+          n_success       <- 0L
+          n_fail          <- 0L
+          n_attempted     <- 0L
           consecutive_429 <- 0L
           quota_exhausted <- FALSE
+          fail_reasons    <- character(0)
 
           for (i in seq_len(nrow(batch))) {
             city_name <- paste0(batch$name[i], ", ", batch$country[i])
@@ -105,30 +149,40 @@ jobs:
               cat(sprintf("  [%d/%d] OK: %s\n", i, nrow(batch), city_name))
             } else {
               n_fail <- n_fail + 1L
+              fail_reasons <- c(fail_reasons, paste0(city_name, ": ", result))
               if (grepl("429", result, fixed = TRUE)) {
                 consecutive_429 <- consecutive_429 + 1L
                 cat(sprintf("  [%d/%d] FAIL (429 #%d): %s\n", i, nrow(batch), consecutive_429, city_name))
                 if (consecutive_429 >= 3L) {
-                  cat("  !! 3 consecutive 429s — daily quota likely exhausted, stopping early\n")
+                  cat("  !! 3 consecutive 429s - daily quota likely exhausted, stopping early\n")
                   quota_exhausted <- TRUE
                   break
                 }
               } else {
                 consecutive_429 <- 0L
-                cat(sprintf("  [%d/%d] FAIL: %s — %s\n", i, nrow(batch), city_name, result))
+                cat(sprintf("  [%d/%d] FAIL: %s - %s\n", i, nrow(batch), city_name, result))
               }
             }
 
             Sys.sleep(2)
           }
 
-          # Update progress — only advance by cities actually attempted
-          new_idx <- start_idx + n_attempted
-          if (new_idx > 1000L) {
-            new_idx  <- 1L
-            new_year <- current_year - 1L
-          } else {
+          # Update progress - hold the pointer if nothing succeeded, so a
+          # systematic failure (proxy block, quota, outage) cannot march
+          # silently through the city list leaving permanent gaps that no
+          # later run retries.
+          if (n_success == 0L) {
+            new_idx  <- start_idx
             new_year <- current_year
+            cat("No cities succeeded - holding progress pointer for retry.\n")
+          } else {
+            new_idx <- start_idx + n_attempted
+            if (new_idx > 1000L) {
+              new_idx  <- 1L
+              new_year <- current_year - 1L
+            } else {
+              new_year <- current_year
+            }
           }
 
           year_key <- as.character(current_year)
@@ -141,32 +195,78 @@ jobs:
           progress$current_year    <- new_year
           progress$next_city_index <- new_idx
           progress$last_run        <- as.character(Sys.Date())
-          progress$last_run_status <- if (quota_exhausted) "quota_exhausted" else if (n_fail == 0) "ok" else "partial"
+          progress$last_run_status <- if (quota_exhausted) {
+            "quota_exhausted"
+          } else if (n_success == 0L) {
+            "failed"
+          } else if (n_fail > 0L) {
+            "partial"
+          } else {
+            "ok"
+          }
           progress$last_run_summary <- sprintf(
             "year=%d cities=%d-%d success=%d fail=%d%s",
             current_year, start_idx, start_idx + n_attempted - 1L, n_success, n_fail,
             if (quota_exhausted) " [stopped: quota exhausted]" else ""
           )
+          # Rewritten on every run that reaches this point, so it cannot
+          # disagree with last_run_status. Keeps every DISTINCT reason, not
+          # just the first: a benign one-off failure ahead of a systematic one
+          # would otherwise be all the operator ever sees.
+          progress$last_run_error <- if (n_fail > 0L) {
+            substr(paste(unique(fail_reasons), collapse = " | "), 1L, 2000L)
+          } else {
+            ""
+          }
+          # The restore step compares this against what it actually unpacked.
+          progress$cache_files <- length(list.files("data/cache", pattern = "\\.parquet$"))
 
           dir.create("data", showWarnings = FALSE)
           jsonlite::write_json(progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
 
-          cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
-                      n_success, n_fail, current_year, start_idx, end_idx))
+          # The range actually attempted, which is shorter than the batch when
+          # the 429 circuit breaker fires. Reporting end_idx here would claim
+          # cities that were never touched.
+          last_attempted <- start_idx + n_attempted - 1L
 
-          # Write commit message to file for next step
+          cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
+                      n_success, n_fail, current_year, start_idx, last_attempted))
+
+          # Commit message for the commit step (a gitignored scratch artifact)
           writeLines(
             sprintf("batch-fetch: %d cities %d-%d (%d ok, %d failed)",
-                    current_year, start_idx, end_idx, n_success, n_fail),
+                    current_year, start_idx, last_attempted, n_success, n_fail),
             "data/.commit_msg"
           )
           EOF
 
-      - name: Commit and push
+      - name: Publish weather cache to release
         run: |
+          set -euo pipefail
+          AFTER=$(ls data/cache | wc -l)
+          if [ "$AFTER" -lt "$CACHE_FILES_BEFORE" ]; then
+            echo "::error::Cache shrank ($CACHE_FILES_BEFORE -> $AFTER); refusing to clobber the release asset."
+            exit 1
+          fi
+          tar -czf cache.tar.gz -C data cache
+          gh release upload cache cache.tar.gz --clobber
+          rm cache.tar.gz
+          echo "Published $AFTER cached city files to the 'cache' release"
+
+      - name: Commit progress
+        run: |
+          set -euo pipefail
+          # No commit message means the fetch script exited before doing any
+          # work - the terminal "all years complete" path does exactly that.
+          # Without this guard the bare `cat` below fails under `set -e` and
+          # the workflow goes permanently red once the backfill finishes.
+          if [ ! -f data/.commit_msg ]; then
+            echo "No commit message written - nothing to commit."
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/batch_progress.json
           COMMIT_MSG=$(cat data/.commit_msg)
           git diff --cached --quiet || git commit -m "$COMMIT_MSG"
-          git push
+          git push origin dev

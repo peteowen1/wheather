@@ -1,6 +1,12 @@
 #!/usr/bin/env Rscript
 # Batch weather data fetcher for wheather package
-# Fetches 60 cities x 1 year per run
+# Fetches 60 cities x 1 year per run.
+#
+# NOTE: this is the standalone script for the Claude Code remote trigger. The
+# scheduled GitHub Actions run uses its own inline copy in
+# .github/workflows/batch-fetch.yml, which additionally restores/publishes the
+# parquet cache from the 'cache' release and has a 429 circuit breaker. The two
+# have drifted; do not assume a fix here reaches CI.
 
 setwd("/home/user/wheather")
 
@@ -55,6 +61,9 @@ cat(sprintf("Date range: %s to %s\n", start_date, end_date))
 n_success <- 0
 n_fail <- 0
 failed_cities <- character(0)
+# Reason strings, not just names: "3 cities failed: Tokyo, ..." gives an
+# operator no way to tell a 403 proxy block from a 429 from a parse error.
+fail_reasons <- character(0)
 
 for (i in seq_len(batch_size)) {
   city <- batch[i, ]
@@ -73,6 +82,7 @@ for (i in seq_len(batch_size)) {
       cat(" EMPTY\n")
       n_fail <- n_fail + 1
       failed_cities <- c(failed_cities, city_name)
+      fail_reasons <- c(fail_reasons, "empty result (0 rows)")
     }
 
     # 2-second delay between calls
@@ -94,29 +104,40 @@ for (i in seq_len(batch_size)) {
           cat(sprintf("[%d/%d] Retry %s EMPTY\n", i, batch_size, city_name))
           n_fail <<- n_fail + 1
           failed_cities <<- c(failed_cities, city_name)
+          fail_reasons <<- c(fail_reasons, "empty result after 429 retry")
         }
       }, error = function(e2) {
         cat(sprintf("[%d/%d] Retry %s FAILED: %s\n", i, batch_size, city_name, conditionMessage(e2)))
         n_fail <<- n_fail + 1
         failed_cities <<- c(failed_cities, city_name)
+        fail_reasons <<- c(fail_reasons, conditionMessage(e2))
       })
     } else {
       cat(sprintf(" FAILED: %s\n", msg))
-      n_fail <- n_fail + 1
-      failed_cities <- c(failed_cities, city_name)
+      n_fail <<- n_fail + 1
+      failed_cities <<- c(failed_cities, city_name)
+      fail_reasons <<- c(fail_reasons, msg)
     }
   })
 }
 
-# Update progress
-new_next_idx <- end_idx + 1
-if (new_next_idx > nrow(cities)) {
-  # Finished this year, move to next
-  new_next_idx <- 1
-  new_year <- current_year - 1
-  cat(sprintf("\nCompleted year %d! Moving to year %d.\n", current_year, new_year))
-} else {
+# Update progress — hold the pointer if nothing succeeded, so a systematic
+# failure (proxy block, quota exhaustion, outage) can't march silently through
+# the city list leaving permanent gaps that no later run retries.
+if (n_success == 0) {
+  new_next_idx <- next_city_index
   new_year <- current_year
+  cat("\nNo cities succeeded — holding progress pointer for retry.\n")
+} else {
+  new_next_idx <- end_idx + 1
+  if (new_next_idx > nrow(cities)) {
+    # Finished this year, move to next
+    new_next_idx <- 1
+    new_year <- current_year - 1
+    cat(sprintf("\nCompleted year %d! Moving to year %d.\n", current_year, new_year))
+  } else {
+    new_year <- current_year
+  }
 }
 
 # Update completed count
@@ -130,7 +151,20 @@ if (!is.null(completed[[completed_key]])) {
 new_progress <- list(
   current_year = new_year,
   next_city_index = new_next_idx,
-  completed = completed
+  completed = completed,
+  last_run = as.character(Sys.Date()),
+  last_run_status = if (n_success == 0) "failed" else if (n_fail > 0) "partial" else "ok",
+  last_run_summary = sprintf("year=%d cities=%d-%d success=%d fail=%d",
+                             current_year, next_city_index, end_idx, n_success, n_fail),
+  # Rewritten on every run that reaches this point, so it cannot disagree
+  # with last_run_status. Distinct reasons rather than the first one only, so
+  # a benign one-off failure cannot mask a systematic one behind it.
+  last_run_error = if (n_fail > 0) {
+    substr(sprintf("%d failed. %s", n_fail,
+                   paste(unique(fail_reasons), collapse = " | ")), 1L, 2000L)
+  } else {
+    ""
+  }
 )
 
 jsonlite::write_json(new_progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
