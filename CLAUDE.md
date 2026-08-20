@@ -55,16 +55,16 @@ Uses bslib (Bootstrap 5, "flatly" theme). Three tabs: Overview (verdict + timeli
 
 `top_cities(1000)` returns the 1000 most populated cities worldwide (from the `maps` package). `batch_fetch()` fetches historical weather for multiple cities with rate-limit handling.
 
-**Scheduled run** (`.github/workflows/batch-fetch.yml`): runs daily at 3am Sydney time, fetching 60 cities × 1 year per run, working backwards from 2025 to 2015. Manage at: https://claude.ai/code/scheduled
+**Scheduled run** (`.github/workflows/batch-fetch.yml`): runs daily at 17:00 UTC, fetching 60 cities × 1 year per run, working backwards from 2025 to 2015. The cron is fixed in UTC and does not follow Sydney's daylight saving, so that is 3am during AEST (April-October) and 4am during AEDT (October-April). Manage at: https://claude.ai/code/scheduled
 
 **Where the data lives.** The parquet cache is **not in git** — it is a single `cache.tar.gz` asset on the `cache` GitHub Release, per the release-as-data-bus pattern. Each run restores it, fetches, and re-uploads with `--clobber`. Two consequences worth knowing:
 
 - The release `createdAt` is meaningless; check the **asset** `updatedAt`.
-- The restore step hard-fails rather than starting cold, and the upload step refuses to publish a cache with fewer files than it restored. Both exist so a transient download failure cannot clobber the release with an empty archive.
+- **The expected file count lives in `batch_progress.json` (`cache_files`), not in the release API.** A failed `gh` query and a genuinely absent asset look identical from the API alone, so trusting it would let one transient outage restore nothing and then publish that nothing over a good archive. The restore step hard-fails whenever it unpacks fewer files than the committed count; a cold start is legitimate only when that count is 0. The upload step re-checks the same invariant before `--clobber`.
 
 To work with the cache locally: `gh release download cache --pattern cache.tar.gz && tar -xzf cache.tar.gz -C data`.
 
-**Progress accounting.** `data/batch_progress.json` is the only thing committed (to `dev`). If a run succeeds for zero cities, the pointer **holds** rather than advancing — a systematic failure (proxy block, quota, outage) must not march through the city list leaving gaps nothing retries. `last_run_error` is rewritten every run, so it is never stale.
+**Progress accounting.** `data/batch_progress.json` is the only thing committed (to `dev`). If a run succeeds for zero cities, the pointer **holds** rather than advancing — a systematic failure (proxy block, quota, outage) must not march through the city list leaving gaps nothing retries. **Partial failures are still skipped:** when some cities succeed, the pointer advances past the ones that did not, and they are recorded only in `last_run_error`. There is no retry queue yet, so a `partial` status is a signal to re-run those cities by hand. `last_run_error` is rewritten on every run that reaches the progress write, so it cannot disagree with `last_run_status`, and it records every distinct failure reason rather than only the first. The one exception is the terminal `current_year < 2015` path, which `quit()`s before writing anything and leaves the last value in place.
 
 > **CURRENT STATUS:** Progress sits at 2024, cities 421-1000 outstanding. Earlier runs through the Claude remote trigger were blocked by a proxy allowlist that does not permit `open-meteo.com` (403). The GitHub Actions workflow does not go through that proxy; if a run still fails, `last_run_status` will read `failed` and the pointer will hold at 421 rather than skipping the batch.
 

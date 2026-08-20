@@ -43,22 +43,39 @@ jobs:
             devtools
 
       # The parquet cache is data, so it lives on the 'cache' release, not in
-      # git history. Restoring it must be all-or-nothing: silently starting
-      # cold would let the upload step clobber the release with a near-empty
-      # archive.
+      # git history.
+      #
+      # The expected file count comes from the COMMITTED progress file, not
+      # from the release API. That matters: a failed `gh` query and a genuinely
+      # absent asset are indistinguishable from the API alone, so trusting it
+      # would let a transient outage restore nothing, then publish that nothing
+      # over a good archive. Cold start is only legitimate when the committed
+      # count is 0.
       - name: Restore weather cache from release
         run: |
           set -euo pipefail
           mkdir -p data/cache
-          if gh release view cache --json assets --jq '.assets[].name' | grep -qx cache.tar.gz; then
-            gh release download cache --pattern cache.tar.gz --dir .
+          EXPECTED=$(jq -r '.cache_files // 0' data/batch_progress.json)
+
+          if gh release download cache --pattern cache.tar.gz --dir . 2> restore-err.log; then
             tar -xzf cache.tar.gz -C data
             rm cache.tar.gz
+          elif [ "$EXPECTED" -eq 0 ]; then
+            echo "No cache asset and none expected - starting cold."
+            cat restore-err.log
           else
-            echo "No cache.tar.gz on the 'cache' release yet - starting cold."
+            echo "::error::Cache restore failed while $EXPECTED files were expected: $(cat restore-err.log)"
+            exit 1
           fi
-          echo "CACHE_FILES_BEFORE=$(ls data/cache | wc -l)" >> "$GITHUB_ENV"
-          echo "Restored $(ls data/cache | wc -l) cached city files"
+          rm -f restore-err.log
+
+          ACTUAL=$(ls data/cache | wc -l)
+          if [ "$ACTUAL" -lt "$EXPECTED" ]; then
+            echo "::error::Restored $ACTUAL cache files but $EXPECTED were expected. Refusing to continue - publishing from here would shrink the release asset."
+            exit 1
+          fi
+          echo "CACHE_FILES_BEFORE=$ACTUAL" >> "$GITHUB_ENV"
+          echo "Restored $ACTUAL cached city files (expected at least $EXPECTED)"
 
       - name: Run batch fetch
         run: |
@@ -192,24 +209,33 @@ jobs:
             current_year, start_idx, start_idx + n_attempted - 1L, n_success, n_fail,
             if (quota_exhausted) " [stopped: quota exhausted]" else ""
           )
-          # Always written, so a stale error from an earlier run can never
-          # survive into a report about this one.
+          # Rewritten on every run that reaches this point, so it cannot
+          # disagree with last_run_status. Keeps every DISTINCT reason, not
+          # just the first: a benign one-off failure ahead of a systematic one
+          # would otherwise be all the operator ever sees.
           progress$last_run_error <- if (n_fail > 0L) {
-            sprintf("%d of %d cities failed. First: %s", n_fail, n_attempted, fail_reasons[1])
+            substr(paste(unique(fail_reasons), collapse = " | "), 1L, 2000L)
           } else {
             ""
           }
+          # The restore step compares this against what it actually unpacked.
+          progress$cache_files <- length(list.files("data/cache", pattern = "\\.parquet$"))
 
           dir.create("data", showWarnings = FALSE)
           jsonlite::write_json(progress, progress_file, auto_unbox = TRUE, pretty = TRUE)
 
+          # The range actually attempted, which is shorter than the batch when
+          # the 429 circuit breaker fires. Reporting end_idx here would claim
+          # cities that were never touched.
+          last_attempted <- start_idx + n_attempted - 1L
+
           cat(sprintf("\nSummary: %d ok, %d failed | year=%d cities=%d-%d\n",
-                      n_success, n_fail, current_year, start_idx, end_idx))
+                      n_success, n_fail, current_year, start_idx, last_attempted))
 
           # Commit message for the commit step (a gitignored scratch artifact)
           writeLines(
             sprintf("batch-fetch: %d cities %d-%d (%d ok, %d failed)",
-                    current_year, start_idx, end_idx, n_success, n_fail),
+                    current_year, start_idx, last_attempted, n_success, n_fail),
             "data/.commit_msg"
           )
           EOF
@@ -230,6 +256,14 @@ jobs:
       - name: Commit progress
         run: |
           set -euo pipefail
+          # No commit message means the fetch script exited before doing any
+          # work - the terminal "all years complete" path does exactly that.
+          # Without this guard the bare `cat` below fails under `set -e` and
+          # the workflow goes permanently red once the backfill finishes.
+          if [ ! -f data/.commit_msg ]; then
+            echo "No commit message written - nothing to commit."
+            exit 0
+          fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/batch_progress.json
