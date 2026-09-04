@@ -1,6 +1,6 @@
 {
   "current_year": 2016,
-  "next_city_index": 181,
+  "next_city_index": 241,
   "completed": {
     "2025": 1000,
     "2024": 1000,
@@ -11,9 +11,9 @@
     "2019": 1000,
     "2018": 1000,
     "2017": 1000,
-    "2016": 180
+    "2016": 240
   },
-  "last_run": "2026-09-03",
+  "last_run": "2026-09-04",
   "last_run_status": "ok",
   "last_run_error": "",
   "last_run_summary": "year=2016 attempted=60 (60 new, 0 retry) success=60 fail=0 queue=0",
