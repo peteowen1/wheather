@@ -32,7 +32,6 @@ Uses bslib (Bootstrap 5, "flatly" theme). Three tabs: Overview (verdict + timeli
 
 - **data.table idiom everywhere** — use `:=`, `.SD`, `rbindlist`, etc. Do not introduce dplyr.
 - **roxygen2 with markdown** — all exported functions have roxygen docs; internal helpers use `@noRd`.
-- **NAMESPACE is auto-generated** — never edit directly; run `devtools::document()`.
 - Open-Meteo API is free and keyless — the `.Renviron.example` referencing `OPENWEATHER_API_KEY` is a leftover and not used by the code.
 - Scoring functions are intentionally simple and pure (no side effects) for easy testing.
 
