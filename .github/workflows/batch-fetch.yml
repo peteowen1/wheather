@@ -56,9 +56,18 @@ jobs:
           mkdir -p data/cache
           EXPECTED=$(jq -r '.cache_files // 0' data/batch_progress.json)
 
+          # Fallback to a cache-new-<run>.tar.gz: the publish step uploads under
+          # that name and only renames it once the old asset is deleted, so a run
+          # interrupted between the two leaves the data there, not nowhere.
+          NEWEST_TMP=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/cache" \
+            --jq '[.assets[] | select(.name | test("^cache-new-[0-9]+[.]tar[.]gz$"))] | sort_by(.created_at) | last | .name // empty' 2>/dev/null || true)
           if gh release download cache --pattern cache.tar.gz --dir . 2> restore-err.log; then
             tar -xzf cache.tar.gz -C data
             rm cache.tar.gz
+          elif [ -n "$NEWEST_TMP" ] && gh release download cache --pattern "$NEWEST_TMP" --dir . 2>> restore-err.log; then
+            echo "::warning::cache.tar.gz missing; restored from $NEWEST_TMP (a publish was interrupted before its rename)"
+            tar -xzf "$NEWEST_TMP" -C data
+            rm "$NEWEST_TMP"
           elif [ "$EXPECTED" -eq 0 ]; then
             echo "No cache asset and none expected - starting cold."
             cat restore-err.log
@@ -89,10 +98,29 @@ jobs:
             echo "::error::Cache shrank ($CACHE_FILES_BEFORE -> $AFTER); refusing to clobber the release asset."
             exit 1
           fi
-          tar -czf cache.tar.gz -C data cache
-          gh release upload cache cache.tar.gz --clobber
-          rm cache.tar.gz
-          echo "Published $AFTER cached city files to the 'cache' release"
+          # Never `--clobber` the archive: clobber DELETES the old asset first, and
+          # on 2026-09-17 the upload that followed failed (HTTP 500 "Error saving
+          # asset"), leaving the release empty for three weeks. Upload under a
+          # unique name, confirm it landed at full size, and only then delete the
+          # old asset and rename the new one into place.
+          NEW="cache-new-${GITHUB_RUN_ID}.tar.gz"
+          tar -czf "$NEW" -C data cache
+          gh release upload cache "$NEW"
+          LOCAL_SIZE=$(stat -c %s "$NEW")
+          ASSETS=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/cache" --jq '.assets')
+          NEW_ID=$(jq -r --arg n "$NEW" '.[] | select(.name == $n and .state == "uploaded") | .id' <<<"$ASSETS")
+          NEW_SIZE=$(jq -r --arg n "$NEW" '.[] | select(.name == $n) | .size' <<<"$ASSETS")
+          if [ -z "$NEW_ID" ] || [ "$NEW_SIZE" != "$LOCAL_SIZE" ]; then
+            echo "::error::Uploaded $NEW is missing or the wrong size (${NEW_SIZE:-none} vs $LOCAL_SIZE bytes); the old archive is left untouched."
+            exit 1
+          fi
+          # Delete the old archive and any leftover temporary copies, then rename.
+          for OLD_ID in $(jq -r --arg n "$NEW" '.[] | select(.name == "cache.tar.gz" or (.name | test("^cache-new-[0-9]+[.]tar[.]gz$") and . != $n)) | .id' <<<"$ASSETS"); do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$OLD_ID"
+          done
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$NEW_ID" -f name=cache.tar.gz >/dev/null
+          rm "$NEW"
+          echo "Published $AFTER cached city files to the 'cache' release ($LOCAL_SIZE bytes)"
 
       - name: Commit progress
         run: |
