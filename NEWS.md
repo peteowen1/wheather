@@ -1,3 +1,15 @@
+# wheather 0.1.6
+
+## Batch pipeline
+
+* **The cache release is no longer published with `--clobber`.** On 2026-09-17 the clobber deleted
+  `cache.tar.gz`, the upload that followed failed (HTTP 500), and the release sat empty for three
+  weeks while every run correctly refused to start. Publishing now uploads a temporary
+  `cache-new-<run>-<attempt>.tar.gz`, checks it landed at full size, and only then replaces the old
+  archive; restore falls back to the newest fully uploaded temporary copy.
+* Progress rewound to 2017 city 241 after re-seeding the cache from a 2026-08-20 copy
+  (2018-2025 complete, 2017 for cities 1-240); the daily run refills the rest.
+
 # wheather 0.1.4
 
 Repository made public. Batch pipeline reworked after a review found it was
