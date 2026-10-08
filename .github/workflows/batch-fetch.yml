@@ -5,6 +5,12 @@ on:
     - cron: '0 17 * * *'  # 17:00 UTC daily = 3am AEST / 4am AEDT
   workflow_dispatch:       # allow manual trigger from GitHub UI
 
+# One run at a time: an overlapping dispatch could delete the other run's
+# temporary upload before it is renamed into place.
+concurrency:
+  group: batch-fetch
+  cancel-in-progress: false
+
 jobs:
   batch-fetch:
     runs-on: ubuntu-latest
@@ -60,7 +66,7 @@ jobs:
           # that name and only renames it once the old asset is deleted, so a run
           # interrupted between the two leaves the data there, not nowhere.
           NEWEST_TMP=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/cache" \
-            --jq '[.assets[] | select(.name | test("^cache-new-[0-9]+[.]tar[.]gz$"))] | sort_by(.created_at) | last | .name // empty' 2>/dev/null || true)
+            --jq '[.assets[] | select(.state == "uploaded" and (.name | test("^cache-new-[0-9]+(-[0-9]+)?[.]tar[.]gz$")))] | sort_by(.created_at) | last | .name // empty' 2>/dev/null || true)
           if gh release download cache --pattern cache.tar.gz --dir . 2> restore-err.log; then
             tar -xzf cache.tar.gz -C data
             rm cache.tar.gz
@@ -103,7 +109,7 @@ jobs:
           # asset"), leaving the release empty for three weeks. Upload under a
           # unique name, confirm it landed at full size, and only then delete the
           # old asset and rename the new one into place.
-          NEW="cache-new-${GITHUB_RUN_ID}.tar.gz"
+          NEW="cache-new-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"   # attempt too: a re-run reuses RUN_ID
           tar -czf "$NEW" -C data cache
           gh release upload cache "$NEW"
           LOCAL_SIZE=$(stat -c %s "$NEW")
@@ -115,7 +121,7 @@ jobs:
             exit 1
           fi
           # Delete the old archive and any leftover temporary copies, then rename.
-          for OLD_ID in $(jq -r --arg n "$NEW" '.[] | select(.name == "cache.tar.gz" or (.name | test("^cache-new-[0-9]+[.]tar[.]gz$") and . != $n)) | .id' <<<"$ASSETS"); do
+          for OLD_ID in $(jq -r --arg n "$NEW" '.[] | select(.name == "cache.tar.gz" or (.name | test("^cache-new-[0-9]+(-[0-9]+)?[.]tar[.]gz$") and . != $n)) | .id' <<<"$ASSETS"); do
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$OLD_ID"
           done
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$NEW_ID" -f name=cache.tar.gz >/dev/null
