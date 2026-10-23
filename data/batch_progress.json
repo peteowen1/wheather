@@ -1,6 +1,6 @@
 {
   "current_year": 2016,
-  "next_city_index": 181,
+  "next_city_index": 241,
   "completed": {
     "2025": 1000,
     "2024": 1000,
@@ -11,12 +11,21 @@
     "2019": 1000,
     "2018": 1000,
     "2017": 1000,
-    "2016": 180
+    "2016": 238
   },
-  "last_run": "2026-10-22",
-  "last_run_status": "ok",
-  "last_run_error": "",
-  "last_run_summary": "year=2016 attempted=60 (60 new, 0 retry) success=60 fail=0 queue=0",
+  "last_run": "2026-10-23",
+  "last_run_status": "partial",
+  "last_run_error": "lexical error: invalid char in json text.\n                                       Unexpected error while streamin\n                     (right here) ------^\n",
+  "last_run_summary": "year=2016 attempted=60 (60 new, 0 retry) success=58 fail=2 queue=2",
   "cache_files": 1000,
-  "retry_queue": []
+  "retry_queue": [
+    {
+      "year": 2016,
+      "index": 233
+    },
+    {
+      "year": 2016,
+      "index": 234
+    }
+  ]
 }
