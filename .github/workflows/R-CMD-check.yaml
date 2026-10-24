@@ -1,0 +1,83 @@
+on:
+  pull_request:
+  workflow_dispatch:
+
+name: R-CMD-check
+
+permissions: read-all
+
+concurrency:
+  group: r-cmd-check-${{ github.ref }}
+  cancel-in-progress: true
+
+# Until this workflow existed nothing in CI ran tests/testthat or
+# tools/test_batch_queue.R, even though the scheduled batch-fetch job runs the
+# queue and pointer logic that script guards and pushes straight to dev.
+jobs:
+  R-CMD-check:
+    runs-on: ubuntu-latest
+
+    name: ubuntu-latest (R release)
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          build_args: 'c("--no-manual")'
+          # Fail on ERRORs only for now. The check has never been run in CI, and
+          # the source tree ships data/batch_progress.json and batch_run.R, which
+          # R CMD check may flag as WARNINGs/NOTEs. Tighten once a first run shows
+          # what it reports.
+          error-on: '"error"'
+
+  # tools/ is in .Rbuildignore, so the batch queue test cannot run inside
+  # R CMD check. Run it, and the testthat suite, from the source tree.
+  source-tests:
+    runs-on: ubuntu-latest
+
+    name: testthat + batch queue test from source tree
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: |
+            any::devtools
+            any::jsonlite
+            any::maps
+          needs: check
+
+      - name: Run testthat suite
+        shell: Rscript {0}
+        run: |
+          res <- as.data.frame(devtools::test(stop_on_failure = FALSE, reporter = "summary"))
+          message("passed=", sum(res$passed), " failed=", sum(res$failed),
+                  " errors=", sum(res$error), " skipped=", sum(res$skipped))
+          if (sum(res$failed) > 0 || any(res$error)) quit(status = 1)
+
+      - name: Run batch queue / pointer test
+        run: Rscript tools/test_batch_queue.R
